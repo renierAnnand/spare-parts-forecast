@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from predictor import SparePartsPredictor
+from spare_parts_predictor import SparePartsPredictor  # renamed to match the actual file you should create
 
 st.set_page_config(page_title="Spare Parts Forecasting", layout="wide")
 st.title("🔧 Spare Parts Sales Forecasting App")
