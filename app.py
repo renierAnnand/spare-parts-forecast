@@ -11,50 +11,43 @@ if 'predictor' not in st.session_state:
 
 predictor = st.session_state.predictor
 
-st.sidebar.header("📂 Data Upload")
+st.sidebar.header("📂 Upload Yearly Files")
 
-uploaded_file_base = st.sidebar.file_uploader("Upload Base Year File", type=['xlsx', 'csv'], key='base')
-uploaded_file_actual = st.sidebar.file_uploader("Upload Actual Year File", type=['xlsx', 'csv'], key='actual')
+uploaded_files = {}
+for year in [2022, 2023, 2024]:
+    uploaded_files[year] = st.sidebar.file_uploader(f"Upload File for {year}", type=['xlsx', 'csv'], key=str(year))
 
-base_year = st.sidebar.number_input("Base Year (e.g., 2022)", min_value=2000, max_value=2100, value=2022)
-prediction_year = st.sidebar.number_input("Prediction Year (e.g., 2023)", min_value=2000, max_value=2100, value=2023)
+for year, file in uploaded_files.items():
+    if file:
+        st.success(f"File Loaded for {year}")
+        df = predictor.load_data(file, year)
+        st.dataframe(df.head(), use_container_width=True)
 
-if uploaded_file_base:
-    st.success(f"Base Year File Loaded for {base_year}")
-    df_base = predictor.load_data(uploaded_file_base, base_year)
-    st.dataframe(df_base.head(), use_container_width=True)
+        if st.button(f"🚀 Train Model for {year}"):
+            predictor.train_models(year)
+            st.success(f"Model trained for {year}!")
+            st.subheader(f"📈 Model Training Summary ({year})")
+            st.write("Total Parts Trained:", len(predictor.models[year]['item_codes']))
 
-    if st.button("🚀 Train Model"):
-        predictor.train_models(base_year)
-        st.success("Model trained successfully!")
+comparison_results = []
 
-        st.subheader("📈 Model Training Summary")
-        st.write("Total Parts Trained:", len(predictor.models[base_year]['item_codes']))
+st.header("📊 Predict & Compare Multiple Years")
+prediction_year = st.number_input("Prediction Year (e.g., 2025)", min_value=2000, max_value=2100, value=2025)
 
-if st.button("🔮 Predict Sales"):
-    predictions = predictor.predict_next_year(base_year, prediction_year)
-    if predictions is not None:
-        st.subheader("📊 Predictions")
-        st.dataframe(predictions.head(20), use_container_width=True)
-
-if uploaded_file_actual:
-    st.success(f"Actual File Loaded for {prediction_year}")
-    predictor.load_data(uploaded_file_actual, prediction_year)
-
-    if st.button("📊 Compare with Actual"):
-        comparison_df, metrics = predictor.compare_predictions(prediction_year, prediction_year)
-
-        if comparison_df is not None:
-            st.subheader("✅ Comparison Table")
-            st.dataframe(comparison_df.head(20), use_container_width=True)
-
-            st.subheader("📉 Model Metrics")
-            for model, metric in metrics.items():
-                st.markdown(f"**{model}**")
-                st.write({k: round(v, 2) for k, v in metric.items()})
-
-            st.subheader("📊 Visual Comparison")
-            predictor.visualize_comparison(comparison_df, metrics, prediction_year)
+if st.button("🔮 Predict and Compare"):
+    for year in [2022, 2023, 2024]:
+        if year in predictor.models:
+            st.subheader(f"➡️ Prediction based on {year}")
+            predictions = predictor.predict_next_year(year, prediction_year)
+            if prediction_year in predictor.training_data:
+                comparison_df, metrics = predictor.compare_predictions(prediction_year, prediction_year)
+                if comparison_df is not None:
+                    st.markdown(f"**Comparison for {year} → {prediction_year}:**")
+                    st.dataframe(comparison_df.head(), use_container_width=True)
+                    for model, metric in metrics.items():
+                        st.markdown(f"**{model}**")
+                        st.write({k: round(v, 2) for k, v in metric.items()})
+                    predictor.visualize_comparison(comparison_df, metrics, prediction_year)
 
 st.sidebar.markdown("---")
 st.sidebar.info("Developed by Digital CoE - ALKHORAYEF")
