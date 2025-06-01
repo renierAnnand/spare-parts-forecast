@@ -1,64 +1,44 @@
 import streamlit as st
 import pandas as pd
-from spare_parts_predictor import SparePartsPredictor  # renamed to match the actual file you should create
+from prophet import Prophet
+import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="Spare Parts Forecasting", layout="wide")
-st.title("🔧 Spare Parts Sales Forecasting App")
+st.title("🔮 Spare Parts Sales Forecast (Meta Prophet - 12 Months)")
 
-# Initialize predictor
-if 'predictor' not in st.session_state:
-    st.session_state.predictor = SparePartsPredictor()
+uploaded_file = st.file_uploader("Upload Excel file with columns: Part, Month, Sales", type=["xlsx"])
 
-predictor = st.session_state.predictor
+if uploaded_file:
+    df = pd.read_excel(uploaded_file)
 
-st.sidebar.header("📂 Upload Yearly Files")
+    if {'Part', 'Month', 'Sales'}.issubset(df.columns):
+        df['Month'] = pd.to_datetime(df['Month'])
+        all_forecasts = []
 
-years = st.sidebar.text_input("Enter years to upload (comma-separated, e.g., 2022,2023,2024)", "2022,2023,2024")
-try:
-    year_list = [int(y.strip()) for y in years.split(",") if y.strip().isdigit()]
-except:
-    year_list = [2022, 2023, 2024]
+        for part in df['Part'].unique():
+            st.subheader(f"📦 {part}")
+            part_data = df[df['Part'] == part][['Month', 'Sales']].rename(columns={'Month': 'ds', 'Sales': 'y'})
 
-uploaded_files = {}
-for year in year_list:
-    uploaded_files[year] = st.sidebar.file_uploader(f"Upload File for {year}", type=['xlsx', 'csv'], key=str(year))
+            try:
+                model = Prophet()
+                model.fit(part_data)
 
-for year, file in uploaded_files.items():
-    if file:
-        st.success(f"File Loaded for {year}")
-        df = predictor.load_data(file, year)
-        st.dataframe(df.head(), use_container_width=True)
+                future = model.make_future_dataframe(periods=12, freq='M')
+                forecast = model.predict(future)
 
-# Train selected years
-st.sidebar.markdown("---")
-selected_train_years = st.sidebar.multiselect("Select years to train models", options=year_list, default=year_list)
+                fig1 = model.plot(forecast)
+                st.pyplot(fig1)
 
-for year in selected_train_years:
-    if year in predictor.training_data:
-        if st.sidebar.button(f"🚀 Train Model for {year}"):
-            predictor.train_models(year)
-            st.sidebar.success(f"Model trained for {year}!")
-            st.subheader(f"📈 Model Training Summary ({year})")
-            st.write("Total Parts Trained:", len(predictor.models[year]['item_codes']))
+                forecast_trimmed = forecast[['ds', 'yhat']].tail(12)
+                forecast_trimmed['Part'] = part
+                all_forecasts.append(forecast_trimmed.rename(columns={'ds': 'Month', 'yhat': 'Forecast'}))
 
-# Prediction & comparison section
-st.header("📊 Predict & Compare Across Years")
-prediction_year = st.number_input("Enter Prediction Year (e.g., 2025)", min_value=2000, max_value=2100, value=2025)
+            except Exception as e:
+                st.error(f"Could not process {part}: {e}")
 
-if st.button("🔮 Run Predictions and Compare"):
-    for train_year in selected_train_years:
-        if train_year in predictor.models:
-            st.subheader(f"➡️ Prediction using model trained on {train_year}")
-            predictions = predictor.predict_next_year(train_year, prediction_year)
-            if prediction_year in predictor.training_data:
-                comparison_df, metrics = predictor.compare_predictions(prediction_year, prediction_year)
-                if comparison_df is not None:
-                    st.markdown(f"**Comparison for model trained on {train_year} → predicting {prediction_year}:**")
-                    st.dataframe(comparison_df.head(), use_container_width=True)
-                    for model, metric in metrics.items():
-                        st.markdown(f"**{model}**")
-                        st.write({k: round(v, 2) for k, v in metric.items()})
-                    predictor.visualize_comparison(comparison_df, metrics, prediction_year)
+        if all_forecasts:
+            result = pd.concat(all_forecasts)
+            st.download_button("📥 Download Forecast CSV", result.to_csv(index=False), file_name="12_month_forecast.csv")
 
-st.sidebar.markdown("---")
-st.sidebar.info("Developed by Digital CoE - ALKHORAYEF")
+    else:
+        st.error("Excel must contain: Part, Month, Sales")
+
