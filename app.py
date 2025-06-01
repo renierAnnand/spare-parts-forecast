@@ -91,7 +91,7 @@ if uploaded_file:
                 .sort_index()
             )
 
-            # 9.b) Build a continuous series from this part’s first sale to max_date
+            # 9.b) Build a continuous series from this part's first sale to max_date
             part_index = pd.date_range(start=raw.index.min(), end=max_date, freq="MS")
             part_train = raw.reindex(part_index, fill_value=0).reset_index().rename(
                 columns={"index": "ds", "Sales": "y"}
@@ -341,3 +341,57 @@ if uploaded_file:
     except Exception as e:
         st.error(f"Error processing file: {e}")
         st.write("Please verify the uploaded Excel has the correct columns (Part, Month, Sales).")
+
+# CODE REVIEW FINDINGS:
+
+"""
+## STRENGTHS:
+1. Good data validation and preprocessing
+2. Handles missing data by filling zeros for continuous time series
+3. Implements hyperparameter tuning for Prophet models
+4. Provides fallback naive forecasting for parts with insufficient data
+5. Good user feedback with progress bars and status messages
+6. Professional Excel output with proper formatting
+
+## POTENTIAL ISSUES:
+
+### 1. LOGIC ERROR in Seasonality Mode Selection (Line 163)
+- Uses data_span_months instead of part-specific data length
+- Should use part_train length for determining seasonality mode per part
+
+### 2. PERFORMANCE CONCERN: Grid Search
+- Running 9 Prophet models per part can be very slow for large datasets
+- Consider reducing grid size or using random search
+
+### 3. MAPE CALCULATION (Line 146)
+- Adding 1e-9 to denominator doesn't properly handle zero actuals
+- Should exclude zero actuals from MAPE calculation
+
+### 4. MISSING ERROR HANDLING:
+- No check if raw.index.min() is None (Line 91)
+- No validation that forecast_months is not empty
+- Missing try-catch around Prophet fitting
+
+### 5. MEMORY EFFICIENCY:
+- Creating full historical matrix for all parts upfront could be memory intensive
+- Consider processing in batches for large datasets
+
+### 6. NAIVE FORECAST LIMITATION:
+- Uses simple 3-month average, could use weighted average or trend
+
+### 7. MISSING FEATURES:
+- No option to exclude specific parts from forecasting
+- No confidence intervals in output
+- No option to adjust forecast horizon
+
+## RECOMMENDED FIXES:
+
+1. Fix seasonality mode selection to be part-specific
+2. Add proper zero-handling in MAPE calculation
+3. Add error handling around Prophet operations
+4. Consider adding configuration options for:
+   - Forecast horizon
+   - Hyperparameter grid size
+   - Minimum data requirements
+5. Add option to export validation metrics separately
+"""
