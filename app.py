@@ -4,10 +4,9 @@ import numpy as np
 import io
 import logging
 from statsmodels.tsa.statespace.sarimax import SARIMAX
-from pmdarima import auto_arima
 
 st.set_page_config(layout="wide")
-st.title("📈 Spare Parts Forecast (SARIMA)")
+st.title("📈 Spare Parts Forecast (SARIMA, no auto_arima)")
 
 uploaded_file = st.file_uploader(
     "Upload Excel file with columns: Part, Month, Sales", type=["xlsx"]
@@ -171,97 +170,18 @@ if uploaded_file:
                     parts_with_naive += 1
                     continue
 
-                # 8.b) Split last 12 months for in-sample validation (if ≥ 24 months total)
-                if len(part_train) > 24:
-                    cutoff_date = max_date - pd.DateOffset(months=12)
-                    train_df = part_train[part_train["ds"] <= cutoff_date].copy()
-                    valid_df = part_train[part_train["ds"] > cutoff_date].copy()
-                else:
-                    train_df = part_train.copy()
-                    valid_df = pd.DataFrame(columns=part_train.columns)
-
-                # 8.c) If we have a validation window, use auto_arima on train_df and compute CV MAPE
-                best_order = None
-                best_seasonal_order = None
-                cv_mape = np.nan
-
-                if not valid_df.empty and len(train_df) >= 12:
-                    try:
-                        # Fit auto_arima on train_df to select orders
-                        arima_model = auto_arima(
-                            train_df["y"],
-                            start_p=0,
-                            start_q=0,
-                            max_p=2,
-                            max_q=2,
-                            seasonal=True,
-                            m=12,
-                            start_P=0,
-                            start_Q=0,
-                            max_P=1,
-                            max_Q=1,
-                            d=1,
-                            D=1,
-                            trace=False,
-                            error_action="ignore",
-                            suppress_warnings=True,
-                            stepwise=True,
-                        )
-
-                        best_order = arima_model.order
-                        best_seasonal_order = arima_model.seasonal_order
-
-                        # Forecast valid window
-                        n_valid = len(valid_df)
-                        preds_valid = arima_model.predict(n_periods=n_valid)
-                        actual_valid = valid_df.sort_values("ds")["y"].values
-
-                        mask = actual_valid != 0
-                        if mask.any():
-                            cv_mape = (
-                                np.mean(np.abs((actual_valid[mask] - preds_valid[mask]) / actual_valid[mask]))
-                                * 100
-                            )
-                        else:
-                            cv_mape = np.nan
-
-                    except Exception as e:
-                        best_order = None
-                        best_seasonal_order = None
-                        cv_mape = np.nan
-
-                row_data["CV_MAPE"] = round(cv_mape, 2) if not np.isnan(cv_mape) else np.nan
-                if best_order is not None:
-                    row_data["Chosen_order"] = f"{best_order}"
-                    row_data["Chosen_seasonal_order"] = f"{best_seasonal_order}"
-                else:
-                    row_data["Chosen_order"] = np.nan
-                    row_data["Chosen_seasonal_order"] = np.nan
-
-                # 8.d) Fit final SARIMA on all available history
+                # 8.b) Fit a default SARIMA(1,1,1)x(1,1,1,12) on the entire history
                 try:
-                    if best_order is not None:
-                        sarima_order = best_order
-                        seasonal_order = best_seasonal_order
-                        final_model = SARIMAX(
-                            part_train["y"],
-                            order=sarima_order,
-                            seasonal_order=seasonal_order,
-                            enforce_stationarity=False,
-                            enforce_invertibility=False,
-                        ).fit(disp=False)
-                    else:
-                        # Fallback to a default SARIMA (1,1,1)x(1,1,1,12)
-                        final_model = SARIMAX(
-                            part_train["y"],
-                            order=(1, 1, 1),
-                            seasonal_order=(1, 1, 1, 12),
-                            enforce_stationarity=False,
-                            enforce_invertibility=False,
-                        ).fit(disp=False)
+                    model = SARIMAX(
+                        part_train["y"],
+                        order=(1, 1, 1),
+                        seasonal_order=(1, 1, 1, 12),
+                        enforce_stationarity=False,
+                        enforce_invertibility=False,
+                    ).fit(disp=False)
 
                     # Forecast next 12 months
-                    forecast_res = final_model.get_forecast(steps=12)
+                    forecast_res = model.get_forecast(steps=12)
                     preds = forecast_res.predicted_mean.round().astype(int)
 
                     for i, fc_month in enumerate(forecast_months):
@@ -273,7 +193,7 @@ if uploaded_file:
                     parts_with_sarima += 1
 
                 except Exception as e:
-                    # Fallback to naive if SARIMA fails
+                    # Fallback to naive if SARIMA fitting fails
                     st.warning(f"SARIMA failed for part {part}: {str(e)}. Using naive forecast.")
                     last_three = part_train.sort_values("ds").tail(3)["y"]
                     naive_forecast = int(round(last_three.mean(), 0)) if len(last_three) > 0 else 0
@@ -306,22 +226,10 @@ if uploaded_file:
         with col4:
             st.metric("Failed", parts_failed)
 
-        if "CV_MAPE" in result_df.columns:
-            cv_table = (
-                result_df[["Item Code", "CV_MAPE", "Method"]]
-                .dropna(subset=["CV_MAPE"])
-                .sort_values(by="CV_MAPE", ascending=False)
-            )
-            if len(cv_table) > 0:
-                st.write("### 🧪 In-Sample Validation (CV MAPE) by Part")
-                st.dataframe(cv_table.head(15))
-
         # 10) Reorder columns
         month_columns = [m.strftime("%b-%Y") for m in list(historical_months) + list(forecast_months)]
         ordered_cols = ["Item Code"] + [c for c in month_columns if c in result_df.columns]
-        final_cols = ordered_cols + [
-            c for c in ["CV_MAPE", "Chosen_order", "Chosen_seasonal_order", "Method"] if c in result_df.columns
-        ]
+        final_cols = ordered_cols + ["Method"]
         result_df = result_df[final_cols]
 
         st.success("✅ Forecasting completed!")
@@ -448,71 +356,3 @@ if uploaded_file:
         import traceback
         st.write("Full error trace:")
         st.code(traceback.format_exc())
-
-# CODE REVIEW FINDINGS:
-
-"""
-## STRENGTHS:
-1. Uses SARIMA which is excellent for seasonal time series
-2. Auto-ARIMA for automatic parameter selection
-3. Good date handling with explicit normalization to month start
-4. Proper MAPE calculation excluding zeros
-5. Shows diagnostic information (date ranges, sales stats)
-6. Good error handling and fallback mechanisms
-7. Professional Excel output with formatting
-
-## POSITIVE ASPECTS OF THIS CODE vs PROPHET:
-1. SARIMA is often better for spare parts with strong seasonality
-2. Auto-ARIMA removes manual hyperparameter tuning
-3. More traditional and interpretable time series approach
-4. Better handling of intermittent demand patterns
-
-## POTENTIAL IMPROVEMENTS:
-
-### 1. COMPUTATIONAL EFFICIENCY
-- Auto-ARIMA can be slow for many parts
-- Consider caching results or parallel processing
-- Could reduce search space for faster processing
-
-### 2. HANDLING INTERMITTENT DEMAND
-- Many spare parts have intermittent demand (lots of zeros)
-- Consider Croston's method or SBA for such parts
-- Could add detection for intermittent vs regular demand
-
-### 3. MINIMUM DATA REQUIREMENTS
-- Currently requires 12+ months for auto_arima
-- Could be relaxed for parts with strong patterns
-
-### 4. FORECAST INTERVALS
-- Currently only provides point forecasts
-- Could add prediction intervals from SARIMA
-
-### 5. MODEL DIAGNOSTICS
-- Could add residual diagnostics
-- AIC/BIC values for model selection transparency
-
-## SUGGESTED ENHANCEMENTS:
-
-1. Add option for faster processing:
-   - Simple SARIMA without auto-tuning
-   - Limit auto_arima search space
-   
-2. Better handling of sparse data:
-   - Detect intermittent demand patterns
-   - Use appropriate methods (Croston, SBA)
-   
-3. Add forecast confidence intervals:
-   - Use SARIMA's built-in intervals
-   - Show uncertainty in forecasts
-   
-4. Performance optimization:
-   - Process parts in batches
-   - Add multiprocessing option
-   
-5. Additional metrics:
-   - Show AIC/BIC for model selection
-   - Add RMSE alongside MAPE
-
-The code is production-ready and handles the date issues well. 
-The SARIMA approach is appropriate for seasonal spare parts data.
-"""
