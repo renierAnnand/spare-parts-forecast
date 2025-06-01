@@ -111,7 +111,9 @@ if uploaded_file:
                 row_data[hist_month.strftime("%b-%Y")] = int(sales_val.iloc[0]) if len(sales_val) > 0 else 0
 
             # 9.e) If too few data points (<8 months), use naive 3‐month average
-            if part_train["ds"].nunique() < 8:
+            # Also check if we have at least 2 non-zero values for Prophet
+            non_zero_count = (part_train["y"] > 0).sum()
+            if part_train["ds"].nunique() < 8 or non_zero_count < 2:
                 last_three = part_train.sort_values("ds").tail(3)["y"]
                 naive_forecast = int(round(last_three.mean(), 0)) if len(last_three) > 0 else 0
                 for fc_month in forecast_months:
@@ -127,7 +129,7 @@ if uploaded_file:
 
             # 9.f) Otherwise, split last 12 months for in‐sample validation
             # Ensure that we have at least 12 months to hold out
-            if data_span_months > 12:
+            if data_span_months > 12 and len(train_df) >= 2:
                 cutoff_date = max_date - pd.DateOffset(months=12)
                 train_df = part_train[part_train["ds"] <= cutoff_date].copy()
                 valid_df = part_train[part_train["ds"] > cutoff_date].copy()
@@ -153,20 +155,27 @@ if uploaded_file:
                             daily_seasonality=False,
                         )
                         m_tmp.add_seasonality(name="monthly", period=12, fourier_order=3)
-                        m_tmp.fit(train_df)
+                        try:
+                            m_tmp.fit(train_df)
+                            
+                            # Forecast the validation window
+                            future_valid = valid_df[["ds"]].copy()
+                            pred_valid = m_tmp.predict(future_valid)["yhat"].values
+                            actual_valid = valid_df.sort_values("ds")["y"].values
 
-                        # Forecast the validation window
-                        future_valid = valid_df[["ds"]].rename(columns={"ds": "ds"})
-                        pred_valid = m_tmp.predict(future_valid)["yhat"].values
-                        actual_valid = valid_df.sort_values("ds")["y"].values
-
-                        # Compute MAPE (avoid division by zero)
-                        mape = np.mean(
-                            np.abs((actual_valid - pred_valid) / (actual_valid + 1e-9))
-                        ) * 100
-                        if mape < best_mape:
-                            best_mape = mape
-                            best_params = {"cps": cps, "sps": sps}
+                            # Compute MAPE (avoid division by zero)
+                            mask = actual_valid != 0
+                            if mask.any():
+                                mape = np.mean(np.abs((actual_valid[mask] - pred_valid[mask]) / actual_valid[mask])) * 100
+                            else:
+                                mape = np.inf
+                                
+                            if mape < best_mape:
+                                best_mape = mape
+                                best_params = {"cps": cps, "sps": sps}
+                        except Exception as e:
+                            # Skip this parameter combination if fitting fails
+                            continue
 
                 # If we never improved (e.g. all infinite), leave defaults
                 row_data["CV_MAPE"] = round(best_mape, 2)
@@ -179,26 +188,46 @@ if uploaded_file:
                 row_data["Chosen_sps"] = np.nan
 
             # 9.h) Fit final model on ALL available history (part_train)
-            final_model = Prophet(
-                changepoint_prior_scale=best_params["cps"],
-                seasonality_prior_scale=best_params["sps"],
-                seasonality_mode="additive" if data_span_months < 36 else "multiplicative",
-                yearly_seasonality=False,
-                weekly_seasonality=False,
-                daily_seasonality=False,
-            )
-            final_model.add_seasonality(name="monthly", period=12, fourier_order=3)
-            final_model.fit(part_train)
+            try:
+                # Check if we have enough data for Prophet
+                if len(part_train) < 2 or (part_train["y"] > 0).sum() < 2:
+                    # Fallback to naive forecast
+                    last_three = part_train.sort_values("ds").tail(3)["y"]
+                    naive_forecast = int(round(last_three.mean(), 0)) if len(last_three) > 0 else 0
+                    for fc_month in forecast_months:
+                        row_data[fc_month.strftime("%b-%Y")] = naive_forecast
+                    results_data.append(row_data)
+                    continue
+                    
+                final_model = Prophet(
+                    changepoint_prior_scale=best_params["cps"],
+                    seasonality_prior_scale=best_params["sps"],
+                    seasonality_mode="additive" if len(part_train) < 36 else "multiplicative",
+                    yearly_seasonality=False,
+                    weekly_seasonality=False,
+                    daily_seasonality=False,
+                )
+                final_model.add_seasonality(name="monthly", period=12, fourier_order=3)
+                final_model.fit(part_train)
 
-            # 9.i) Forecast the next 12 months (forecast_months)
-            future_df = pd.DataFrame({"ds": forecast_months})
-            forecast = final_model.predict(future_df)
+                # 9.i) Forecast the next 12 months (forecast_months)
+                future_df = pd.DataFrame({"ds": forecast_months})
+                forecast = final_model.predict(future_df)
 
-            for j, fc_month in enumerate(forecast_months):
-                yhat = forecast.iloc[j]["yhat"]
-                row_data[fc_month.strftime("%b-%Y")] = max(0, int(round(yhat, 0)))
+                for j, fc_month in enumerate(forecast_months):
+                    yhat = forecast.iloc[j]["yhat"]
+                    row_data[fc_month.strftime("%b-%Y")] = max(0, int(round(yhat, 0)))
 
-            results_data.append(row_data)
+                results_data.append(row_data)
+                
+            except Exception as e:
+                # If Prophet fails, fallback to naive forecast
+                st.warning(f"Prophet failed for part {part}: {str(e)}. Using naive forecast.")
+                last_three = part_train.sort_values("ds").tail(3)["y"]
+                naive_forecast = int(round(last_three.mean(), 0)) if len(last_three) > 0 else 0
+                for fc_month in forecast_months:
+                    row_data[fc_month.strftime("%b-%Y")] = naive_forecast
+                results_data.append(row_data)
 
         # Clear progress indicators
         progress_bar.empty()
