@@ -6,7 +6,7 @@ import logging
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 st.set_page_config(layout="wide")
-st.title("📈 Spare Parts Forecast (SARIMA, no auto_arima)")
+st.title("📈 Spare Parts Forecast (SARIMA, datetime-indexed)")
 
 uploaded_file = st.file_uploader(
     "Upload Excel file with columns: Part, Month, Sales", type=["xlsx"]
@@ -88,15 +88,18 @@ if uploaded_file:
         )
         data_span_years = data_span_months / 12
 
-        st.write(f"📅 Historical data covers: {min_date.strftime('%Y-%m')} → {max_date.strftime('%Y-%m')}")
+        st.write(
+            f"📅 Historical data covers: {min_date.strftime('%Y-%m')} "
+            f"→ {max_date.strftime('%Y-%m')}"
+        )
         st.write(f"📦 Total unique parts: {df_grouped['Part'].nunique()}")
         st.write(f"📊 Total aggregated records: {len(df_grouped)}")
         st.write(f"📊 Data span: {data_span_months} months ({data_span_years:.1f} years)")
 
         if data_span_months < 12:
-            st.warning("⚠️ Fewer than 12 months of history total – forecasts may be unreliable for many parts.")
+            st.warning("⚠️ Fewer than 12 months of history total—forecasts may be unreliable.")
         elif data_span_months < 24:
-            st.info("ℹ️ Between 12 and 24 months of data – consider adding more history if possible.")
+            st.info("ℹ️ Between 12 and 24 months of data—consider adding more history.")
         else:
             st.success("✅ Good historical coverage (≥24 months).")
 
@@ -108,8 +111,14 @@ if uploaded_file:
         forecast_end = forecast_start + pd.DateOffset(months=11)
         forecast_months = pd.date_range(start=forecast_start, end=forecast_end, freq="MS")
 
-        st.write(f"📅 Historical months range: {historical_months[0].strftime('%Y-%m')} to {historical_months[-1].strftime('%Y-%m')} ({len(historical_months)} months)")
-        st.success(f"🔮 Prediction period: {forecast_start.strftime('%Y-%m')} → {forecast_end.strftime('%Y-%m')}")
+        st.write(
+            f"📅 Historical months: "
+            f"{historical_months[0].strftime('%Y-%m')} to {historical_months[-1].strftime('%Y-%m')} "
+            f"({len(historical_months)} months)"
+        )
+        st.success(
+            f"🔮 Prediction period: {forecast_start.strftime('%Y-%m')} → {forecast_end.strftime('%Y-%m')}"
+        )
 
         # 7) Prepare progress bar
         progress_bar = st.progress(0)
@@ -129,6 +138,7 @@ if uploaded_file:
             status_text.text(f"Processing part {idx + 1}/{total_parts}: {part}")
 
             try:
+                # Extract each part’s monthly series, indexed by Month
                 raw = (
                     df_grouped[df_grouped["Part"] == part]
                     .loc[:, ["Month", "Sales"]]
@@ -141,13 +151,19 @@ if uploaded_file:
                     parts_failed += 1
                     continue
 
+                # Build a continuous monthly index from first sale to max_date
                 part_index = pd.date_range(start=raw.index.min(), end=max_date, freq="MS")
-                part_train = raw.reindex(part_index, fill_value=0).reset_index().rename(
-                    columns={"index": "ds", "Sales": "y"}
+                part_train = (
+                    raw.reindex(part_index, fill_value=0)
+                    .reset_index()
+                    .rename(columns={"index": "ds", "Sales": "y"})
                 )
 
-                part_full_hist = raw.reindex(historical_months, fill_value=0).reset_index().rename(
-                    columns={"index": "Month", "Sales": "Sales"}
+                # Create a full‐history snapshot (for storing “historical” columns later)
+                part_full_hist = (
+                    raw.reindex(historical_months, fill_value=0)
+                    .reset_index()
+                    .rename(columns={"index": "Month", "Sales": "Sales"})
                 )
 
                 row_data = {"Item Code": part}
@@ -157,9 +173,9 @@ if uploaded_file:
                     ]
                     row_data[hist_month.strftime("%b-%Y")] = int(sales_val.iloc[0]) if len(sales_val) > 0 else 0
 
-                # 8.a) If too few data points (< 8 months) or too few nonzeros, use naive 3-month average
+                # 8.a) If too few data points (<12 months) or too few nonzero months, use naive 3-month avg
                 non_zero_count = (part_train["y"] > 0).sum()
-                if part_train["ds"].nunique() < 8 or non_zero_count < 2:
+                if (len(part_train) < 12) or (non_zero_count < 2):
                     last_three = part_train.sort_values("ds").tail(3)["y"]
                     naive_forecast = int(round(last_three.mean(), 0)) if len(last_three) > 0 else 0
                     for fc_month in forecast_months:
@@ -170,10 +186,13 @@ if uploaded_file:
                     parts_with_naive += 1
                     continue
 
-                # 8.b) Fit a default SARIMA(1,1,1)x(1,1,1,12) on the entire history
+                # 8.b) Fit SARIMA on the datetime-indexed series
                 try:
+                    ts = part_train.set_index("ds")["y"]  # Series with a datetime index
+
+                    # Fit a standard (1,1,1)x(1,1,1,12) SARIMA
                     model = SARIMAX(
-                        part_train["y"],
+                        ts,
                         order=(1, 1, 1),
                         seasonal_order=(1, 1, 1, 12),
                         enforce_stationarity=False,
@@ -185,7 +204,8 @@ if uploaded_file:
                     preds = forecast_res.predicted_mean.round().astype(int)
 
                     for i, fc_month in enumerate(forecast_months):
-                        yhat = preds[i]
+                        yhat = preds.iloc[i]
+                        # Clip negative predictions to zero
                         row_data[fc_month.strftime("%b-%Y")] = max(0, int(yhat))
 
                     row_data["Method"] = "SARIMA"
@@ -193,7 +213,7 @@ if uploaded_file:
                     parts_with_sarima += 1
 
                 except Exception as e:
-                    # Fallback to naive if SARIMA fitting fails
+                    # If SARIMA fails for some numeric reason, fall back to naive
                     st.warning(f"SARIMA failed for part {part}: {str(e)}. Using naive forecast.")
                     last_three = part_train.sort_values("ds").tail(3)["y"]
                     naive_forecast = int(round(last_three.mean(), 0)) if len(last_three) > 0 else 0
@@ -226,7 +246,7 @@ if uploaded_file:
         with col4:
             st.metric("Failed", parts_failed)
 
-        # 10) Reorder columns
+        # 10) Reorder columns: Item Code → all months (historical + forecast) → Method
         month_columns = [m.strftime("%b-%Y") for m in list(historical_months) + list(forecast_months)]
         ordered_cols = ["Item Code"] + [c for c in month_columns if c in result_df.columns]
         final_cols = ordered_cols + ["Method"]
@@ -237,19 +257,25 @@ if uploaded_file:
 
         # 11) Show a quick preview
         st.write("**Forecast sample (first 10 parts):**")
-        preview_cols = ["Item Code"] + month_columns[-3:] + forecast_months[:3].strftime("%b-%Y").tolist() + ["Method"]
+        preview_cols = (
+            ["Item Code"] 
+            + month_columns[-3:]  # last 3 historical months
+            + [m.strftime("%b-%Y") for m in forecast_months[:3]]  # first 3 forecast months
+            + ["Method"]
+        )
         preview_cols = [c for c in preview_cols if c in result_df.columns]
         st.dataframe(result_df[preview_cols].head(10))
 
         # 12) Prepare Excel download
         excel_df = result_df.loc[:, ["Item Code"] + month_columns].fillna("")
 
+        # Build two-row header: month names + “Historical QTY”/“Forecasted QTY”
         header_row_1 = ["Item Code"]
         header_row_2 = [""]
         for col in month_columns:
             header_row_1.append(col)
             dt = pd.to_datetime(col, format="%b-%Y", errors="coerce")
-            if pd.isna(dt) or dt <= max_date:
+            if pd.isna(dt) or (dt <= max_date):
                 header_row_2.append("Historical QTY")
             else:
                 header_row_2.append("Forecasted QTY")
@@ -330,7 +356,7 @@ if uploaded_file:
                         col_name = header_row_1[col_num]
                         try:
                             dt = pd.to_datetime(col_name, format="%b-%Y", errors="coerce")
-                            if pd.isna(dt) or dt <= max_date:
+                            if pd.isna(dt) or (dt <= max_date):
                                 worksheet.write(row_num, col_num, cell, hist_format)
                             else:
                                 worksheet.write(row_num, col_num, cell, fc_format)
