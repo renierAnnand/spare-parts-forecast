@@ -1,8 +1,7 @@
 streamlit
-prophet
 pandas
 numpy
-openpyxl
-xlsxwriter
-statsmodels>=0.13.0
-pmdarima>=1.8.0
+statsmodels
+pmdarima
+xlsxwriter      # Because you’re using `pd.ExcelWriter(engine="xlsxwriter")`
+openpyxl        # For reading `.xlsx` files with `pd.read_excel`
