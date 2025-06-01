@@ -44,29 +44,36 @@ if uploaded_file:
         
         st.write(f"🔄 After cleaning: {df_grouped['Part'].nunique()} parts, {len(df_grouped)} records")
         
-        # Determine date ranges - CRITICAL: Ensure no data leakage
+        # Determine date ranges - Use ALL historical data for training
         min_date = df_grouped['Month'].min()
         max_date = df_grouped['Month'].max()
         
-        st.write(f"📅 **Training data range**: {min_date.strftime('%Y-%m')} to {max_date.strftime('%Y-%m')}")
+        # Calculate data span
+        data_span_months = (max_date.year - min_date.year) * 12 + (max_date.month - min_date.month) + 1
+        data_span_years = data_span_months / 12
         
-        # Split data: Use historical for training, predict FUTURE months only
-        training_end = max_date  # Last available data point
-        forecast_start = training_end + pd.DateOffset(months=1)
+        st.write(f"📅 **Historical Data Range**: {min_date.strftime('%Y-%m')} to {max_date.strftime('%Y-%m')}")
+        st.write(f"📊 **Data Span**: {data_span_months} months ({data_span_years:.1f} years)")
+        
+        # Forecast starts from the month AFTER the last historical data
+        forecast_start = max_date + pd.DateOffset(months=1)
         forecast_end = forecast_start + pd.DateOffset(months=11)  # 12 months forecast
         
-        st.write(f"🔮 **Forecasting period**: {forecast_start.strftime('%Y-%m')} to {forecast_end.strftime('%Y-%m')}")
-        st.warning(f"⚠️ **Important**: Predictions are for FUTURE months ({forecast_start.strftime('%Y-%m')} onwards). If you see exact matches with historical data, there's a data leakage issue!")
+        st.success(f"🔮 **Prediction Period**: {forecast_start.strftime('%Y-%m')} to {forecast_end.strftime('%Y-%m')}")
+        st.info(f"✅ **Training on**: {data_span_months} months of historical data")
+        st.info(f"🎯 **Forecasting**: Next 12 months after {max_date.strftime('%Y-%m')}")
         
         # Create date ranges
         historical_months = pd.date_range(start=min_date, end=max_date, freq='MS')
         forecast_months = pd.date_range(start=forecast_start, end=forecast_end, freq='MS')
         
-        # Verify no overlap between training and prediction periods
-        if forecast_start <= max_date:
-            st.error("🚨 **DATA LEAKAGE DETECTED**: Forecast period overlaps with training data!")
-            st.write("This would cause artificially perfect predictions.")
-            st.stop()
+        # Validate data quality
+        if data_span_months < 12:
+            st.warning(f"⚠️ **Limited Data**: Only {data_span_months} months available. Consider having at least 12-24 months for better predictions.")
+        elif data_span_months >= 24:
+            st.success(f"✅ **Excellent Data**: {data_span_months} months of data will produce reliable forecasts!")
+        else:
+            st.info(f"✅ **Good Data**: {data_span_months} months should produce reasonable forecasts.")
         
         # Progress tracking
         progress_bar = st.progress(0)
@@ -94,61 +101,59 @@ if uploaded_file:
                 historical_sales = part_data[part_data['Month'].dt.to_period('M') == month.to_period('M')]['Sales']
                 row_data[month_key] = int(historical_sales.iloc[0]) if len(historical_sales) > 0 else ''
             
-            # Generate forecasts
-            if part_data['Month'].nunique() < 6:
+            # Generate forecasts using ALL historical data
+            if part_data['Month'].nunique() < 3:
                 # Not enough data for forecasting
                 for month in forecast_months:
                     month_key = month.strftime('%b-%Y')
-                    row_data[month_key] = 'Not enough data'
+                    row_data[month_key] = 'Not enough data (min 3 months)'
             else:
                 try:
-                    # CRITICAL: Only use data UP TO training_end for model training
-                    training_data = part_data[part_data['Month'] <= training_end].copy()
+                    # Use ALL available historical data for training
+                    model_df = part_data.rename(columns={'Month': 'ds', 'Sales': 'y'})
                     
-                    if len(training_data) < 6:
-                        for month in forecast_months:
-                            month_key = month.strftime('%b-%Y')
-                            row_data[month_key] = 'Insufficient training data'
-                        continue
+                    # Debug info for first part only
+                    if i == 0:
+                        st.write(f"**Example Training Data for '{part}':**")
+                        st.write(f"- Historical data: {model_df['ds'].min().strftime('%Y-%m')} to {model_df['ds'].max().strftime('%Y-%m')}")
+                        st.write(f"- Training records: {len(model_df)} months")
+                        st.write(f"- Predicting: {forecast_start.strftime('%Y-%m')} to {forecast_end.strftime('%Y-%m')}")
+                        st.write(f"- Sample historical sales: {model_df['y'].head(3).tolist()}")
                     
-                    # Prepare ONLY historical data for Prophet
-                    model_df = training_data.rename(columns={'Month': 'ds', 'Sales': 'y'})
-                    
-                    # Debug: Show what data we're training on
-                    if i == 0:  # Show for first part only
-                        st.write(f"**Debug - Training data for {part}:**")
-                        st.write(f"- Training period: {model_df['ds'].min().strftime('%Y-%m')} to {model_df['ds'].max().strftime('%Y-%m')}")
-                        st.write(f"- Training records: {len(model_df)}")
-                        st.write(f"- Will predict: {forecast_start.strftime('%Y-%m')} to {forecast_end.strftime('%Y-%m')}")
-                    
-                    # Create and fit Prophet model on HISTORICAL data only
-                    model = Prophet(
-                        changepoint_prior_scale=0.05,
-                        seasonality_mode='multiplicative',
-                        yearly_seasonality=True,
-                        weekly_seasonality=False,
-                        daily_seasonality=False
-                    )
+                    # Create Prophet model optimized for your data span
+                    if data_span_months >= 24:
+                        # Enough data for full seasonality
+                        model = Prophet(
+                            changepoint_prior_scale=0.1,
+                            seasonality_mode='multiplicative',
+                            yearly_seasonality=True,
+                            weekly_seasonality=False,
+                            daily_seasonality=False
+                        )
+                    else:
+                        # Limited data - simpler model
+                        model = Prophet(
+                            changepoint_prior_scale=0.05,
+                            seasonality_mode='additive',
+                            yearly_seasonality=False,
+                            weekly_seasonality=False,
+                            daily_seasonality=False
+                        )
                     
                     model.fit(model_df)
                     
-                    # Create future predictions for UNSEEN months
+                    # Create future predictions for the next 12 months
                     future_dates = pd.DataFrame({'ds': forecast_months})
                     forecast = model.predict(future_dates)
                     
-                    # Add forecast values with uncertainty indicators
+                    # Add realistic forecast values
                     for j, month in enumerate(forecast_months):
                         month_key = month.strftime('%b-%Y')
                         forecast_value = forecast.iloc[j]['yhat']
-                        forecast_lower = forecast.iloc[j]['yhat_lower']
-                        forecast_upper = forecast.iloc[j]['yhat_upper']
                         
-                        # Show prediction with confidence interval
-                        predicted_value = int(round(max(0, forecast_value), 0))
-                        confidence_range = int(round(forecast_upper - forecast_lower, 0))
-                        
-                        # Format: "predicted_value (±range)"
-                        row_data[month_key] = f"{predicted_value} (±{confidence_range})"
+                        # Ensure non-negative and realistic values
+                        predicted_value = max(0, round(forecast_value, 0))
+                        row_data[month_key] = int(predicted_value)
                     
                 except Exception as e:
                     # Error in forecasting
@@ -219,7 +224,9 @@ if uploaded_file:
         
         for month_col in month_columns:
             month_headers.append(month_col)
-            if any(year in month_col for year in ['2022', '2023']):
+            # Check if this is historical or forecast data
+            month_date = pd.to_datetime(month_col, format='%b-%Y', errors='ignore')
+            if pd.isna(month_date) or month_date <= max_date:
                 data_type_headers.append('Historical QTY')
             else:
                 data_type_headers.append('Forecasted QTY')
@@ -303,11 +310,15 @@ if uploaded_file:
                     if col_num == 0:  # Item Code column
                         worksheet.write(row_num, col_num, cell_value, item_code_format)
                     else:
-                        # Determine if historical or forecast
+                        # Determine if historical or forecast based on actual date
                         month_col = month_headers[col_num] if col_num < len(month_headers) else ''
-                        if any(year in str(month_col) for year in ['2022', '2023']):
-                            worksheet.write(row_num, col_num, cell_value, historical_format)
-                        else:
+                        try:
+                            month_date = pd.to_datetime(month_col, format='%b-%Y', errors='ignore')
+                            if pd.isna(month_date) or month_date <= max_date:
+                                worksheet.write(row_num, col_num, cell_value, historical_format)
+                            else:
+                                worksheet.write(row_num, col_num, cell_value, forecast_format)
+                        except:
                             worksheet.write(row_num, col_num, cell_value, forecast_format)
             
             # Set column widths
