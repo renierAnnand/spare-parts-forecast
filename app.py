@@ -44,19 +44,29 @@ if uploaded_file:
         
         st.write(f"🔄 After cleaning: {df_grouped['Part'].nunique()} parts, {len(df_grouped)} records")
         
-        # Determine date ranges
+        # Determine date ranges - CRITICAL: Ensure no data leakage
         min_date = df_grouped['Month'].min()
         max_date = df_grouped['Month'].max()
         
-        # Forecast next 12 months after last available data
-        forecast_start = max_date + pd.DateOffset(months=1)
-        forecast_end = forecast_start + pd.DateOffset(months=11)
+        st.write(f"📅 **Training data range**: {min_date.strftime('%Y-%m')} to {max_date.strftime('%Y-%m')}")
         
-        st.write(f"🎯 Will forecast from {forecast_start.strftime('%Y-%m')} to {forecast_end.strftime('%Y-%m')}")
+        # Split data: Use historical for training, predict FUTURE months only
+        training_end = max_date  # Last available data point
+        forecast_start = training_end + pd.DateOffset(months=1)
+        forecast_end = forecast_start + pd.DateOffset(months=11)  # 12 months forecast
+        
+        st.write(f"🔮 **Forecasting period**: {forecast_start.strftime('%Y-%m')} to {forecast_end.strftime('%Y-%m')}")
+        st.warning(f"⚠️ **Important**: Predictions are for FUTURE months ({forecast_start.strftime('%Y-%m')} onwards). If you see exact matches with historical data, there's a data leakage issue!")
         
         # Create date ranges
         historical_months = pd.date_range(start=min_date, end=max_date, freq='MS')
         forecast_months = pd.date_range(start=forecast_start, end=forecast_end, freq='MS')
+        
+        # Verify no overlap between training and prediction periods
+        if forecast_start <= max_date:
+            st.error("🚨 **DATA LEAKAGE DETECTED**: Forecast period overlaps with training data!")
+            st.write("This would cause artificially perfect predictions.")
+            st.stop()
         
         # Progress tracking
         progress_bar = st.progress(0)
@@ -92,10 +102,26 @@ if uploaded_file:
                     row_data[month_key] = 'Not enough data'
             else:
                 try:
-                    # Prepare data for Prophet
-                    model_df = part_data.rename(columns={'Month': 'ds', 'Sales': 'y'})
+                    # CRITICAL: Only use data UP TO training_end for model training
+                    training_data = part_data[part_data['Month'] <= training_end].copy()
                     
-                    # Create and fit Prophet model
+                    if len(training_data) < 6:
+                        for month in forecast_months:
+                            month_key = month.strftime('%b-%Y')
+                            row_data[month_key] = 'Insufficient training data'
+                        continue
+                    
+                    # Prepare ONLY historical data for Prophet
+                    model_df = training_data.rename(columns={'Month': 'ds', 'Sales': 'y'})
+                    
+                    # Debug: Show what data we're training on
+                    if i == 0:  # Show for first part only
+                        st.write(f"**Debug - Training data for {part}:**")
+                        st.write(f"- Training period: {model_df['ds'].min().strftime('%Y-%m')} to {model_df['ds'].max().strftime('%Y-%m')}")
+                        st.write(f"- Training records: {len(model_df)}")
+                        st.write(f"- Will predict: {forecast_start.strftime('%Y-%m')} to {forecast_end.strftime('%Y-%m')}")
+                    
+                    # Create and fit Prophet model on HISTORICAL data only
                     model = Prophet(
                         changepoint_prior_scale=0.05,
                         seasonality_mode='multiplicative',
@@ -106,21 +132,29 @@ if uploaded_file:
                     
                     model.fit(model_df)
                     
-                    # Create future predictions
+                    # Create future predictions for UNSEEN months
                     future_dates = pd.DataFrame({'ds': forecast_months})
                     forecast = model.predict(future_dates)
                     
-                    # Add forecast values
+                    # Add forecast values with uncertainty indicators
                     for j, month in enumerate(forecast_months):
                         month_key = month.strftime('%b-%Y')
                         forecast_value = forecast.iloc[j]['yhat']
-                        row_data[month_key] = int(round(max(0, forecast_value), 0))
+                        forecast_lower = forecast.iloc[j]['yhat_lower']
+                        forecast_upper = forecast.iloc[j]['yhat_upper']
+                        
+                        # Show prediction with confidence interval
+                        predicted_value = int(round(max(0, forecast_value), 0))
+                        confidence_range = int(round(forecast_upper - forecast_lower, 0))
+                        
+                        # Format: "predicted_value (±range)"
+                        row_data[month_key] = f"{predicted_value} (±{confidence_range})"
                     
                 except Exception as e:
                     # Error in forecasting
                     for month in forecast_months:
                         month_key = month.strftime('%b-%Y')
-                        row_data[month_key] = 'Error'
+                        row_data[month_key] = f'Error: {str(e)[:20]}'
             
             results_data.append(row_data)
         
@@ -139,9 +173,34 @@ if uploaded_file:
         existing_columns = [col for col in column_order if col in result_df.columns]
         result_df = result_df[existing_columns]
         
-        # Display summary
+        # Display summary with validation
         st.success("Forecasting completed!")
         st.write(f"Generated forecasts for {len(result_df)} parts")
+        
+        # VALIDATION: Check if predictions look realistic
+        forecast_cols = [col for col in result_df.columns if any(year in col for year in ['2024', '2025', '2026'])]
+        if forecast_cols:
+            sample_forecasts = []
+            for col in forecast_cols[:3]:  # Check first 3 forecast columns
+                col_values = result_df[col].tolist()
+                numeric_values = []
+                for val in col_values:
+                    if isinstance(val, str) and '(' in val:
+                        try:
+                            numeric_values.append(int(val.split('(')[0].strip()))
+                        except:
+                            pass
+                    elif isinstance(val, (int, float)):
+                        numeric_values.append(val)
+                
+                if numeric_values:
+                    sample_forecasts.extend(numeric_values[:5])
+            
+            if sample_forecasts:
+                st.write(f"**Forecast Validation:**")
+                st.write(f"- Sample predicted values: {sample_forecasts[:10]}")
+                st.write(f"- Average forecast: {sum(sample_forecasts) / len(sample_forecasts):.0f}")
+                st.write(f"- Min/Max forecasts: {min(sample_forecasts)} / {max(sample_forecasts)}")
         
         # Show preview
         st.write("**Data preview (first 5 parts and 8 columns):**")
