@@ -60,10 +60,18 @@ if uploaded_file:
         if len(top_parts) > 0:
             st.write("### Top 10 Parts by Total Sales:")
             st.dataframe(top_parts)
+            
+        # Debug: Show date range in original data
+        st.write("### Date Range in Original Data:")
+        date_counts = df.groupby(df['Month'].dt.to_period('M'))['Sales'].agg(['count', 'sum'])
+        st.dataframe(date_counts)
 
         # 4) Aggregate any duplicate (Part, Month) pairs
+        # First normalize dates to beginning of month
+        df["Month"] = pd.to_datetime(df["Month"]).dt.to_period('M').dt.to_timestamp()
+        
         df_grouped = (
-            df.groupby(["Part", pd.Grouper(key="Month", freq="M")])["Sales"]
+            df.groupby(["Part", "Month"])["Sales"]
             .sum()
             .reset_index()
         )
@@ -96,7 +104,15 @@ if uploaded_file:
             st.success("✅ Good historical coverage (≥24 months).")
 
         # 7) Define monthly indices
+        # Ensure min_date is at the start of the month
+        min_date = min_date.replace(day=1)
+        max_date = max_date.replace(day=1)
+        
         historical_months = pd.date_range(start=min_date, end=max_date, freq="MS")
+        
+        # Debug: Show what months we're creating
+        st.write(f"📅 Historical months range: {historical_months[0].strftime('%Y-%m')} to {historical_months[-1].strftime('%Y-%m')} ({len(historical_months)} months)")
+        
         forecast_start = max_date + pd.DateOffset(months=1)
         forecast_end = forecast_start + pd.DateOffset(months=11)
         forecast_months = pd.date_range(start=forecast_start, end=forecast_end, freq="MS")
@@ -152,6 +168,15 @@ if uploaded_file:
 
                 # 9.d) Initialize row_data for output
                 row_data = {"Item Code": part}
+                
+                # Debug for first part
+                if idx == 0:
+                    st.write(f"Debug for part {part}:")
+                    st.write(f"- Raw data points: {len(raw)}")
+                    st.write(f"- Date range in raw: {raw.index.min()} to {raw.index.max()}")
+                    st.write(f"- Historical months count: {len(historical_months)}")
+                    st.write(f"- First few sales values: {raw.head()}")
+                
                 for hist_month in historical_months:
                     sales_val = part_full_hist.loc[
                         part_full_hist["Month"] == hist_month, "Sales"
