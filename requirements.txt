@@ -1,5 +1,6 @@
 streamlit
+prophet
 pandas
 openpyxl
+scikit-learn
 matplotlib
-prophet
