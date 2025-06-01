@@ -1,80 +1,43 @@
 import streamlit as st
 import pandas as pd
 from prophet import Prophet
-import numpy as np
-import io
+import matplotlib.pyplot as plt
 
-st.title("📈 Spare Parts Forecast vs Actual (May 2025 – April 2026)")
+st.title("🔮 Spare Parts Sales Forecast (Meta Prophet - 12 Months)")
 
-uploaded_file = st.file_uploader("Upload Excel file with: Part, Month, Sales", type=["xlsx"])
+uploaded_file = st.file_uploader("Upload Excel file with columns: Part, Month, Sales", type=["xlsx"])
 
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
-    df['Month'] = pd.to_datetime(df['Month'])
 
-    # Filter for Jan 2022 to April 2025 only
-    df = df[(df['Month'] >= '2022-01-01') & (df['Month'] <= '2025-04-30')]
-    df = df.dropna()
-    df = df.drop_duplicates()
+    if {'Part', 'Month', 'Sales'}.issubset(df.columns):
+        df['Month'] = pd.to_datetime(df['Month'])
+        all_forecasts = []
 
-    df_grouped = df.groupby(['Part', pd.Grouper(key='Month', freq='M')])['Sales'].sum().reset_index()
+        for part in df['Part'].unique():
+            st.subheader(f"📦 {part}")
+            part_data = df[df['Part'] == part][['Month', 'Sales']].rename(columns={'Month': 'ds', 'Sales': 'y'})
 
-    all_results = []
+            try:
+                model = Prophet()
+                model.fit(part_data)
 
-    for part in df_grouped['Part'].unique():
-        part_data = df_grouped[df_grouped['Part'] == part][['Month', 'Sales']].dropna()
+                future = model.make_future_dataframe(periods=12, freq='M')
+                forecast = model.predict(future)
 
-        if part_data['Month'].nunique() < 24:
-            for month in pd.date_range(start='2025-05-01', end='2026-04-30', freq='MS'):
-                all_results.append({
-                    'Part': part,
-                    'Month': month,
-                    'Sales': np.nan,
-                    'Forecast': 'Not enough data'
-                })
-            continue
+                fig1 = model.plot(forecast)
+                st.pyplot(fig1)
 
-        try:
-            model_df = part_data.rename(columns={'Month': 'ds', 'Sales': 'y'})
-            model = Prophet(
-                changepoint_prior_scale=0.05,
-                seasonality_mode='multiplicative',
-                yearly_seasonality=True,
-                weekly_seasonality=False,
-                daily_seasonality=False
-            )
-            model.fit(model_df)
+                forecast_trimmed = forecast[['ds', 'yhat']].tail(12)
+                forecast_trimmed['Part'] = part
+                all_forecasts.append(forecast_trimmed.rename(columns={'ds': 'Month', 'yhat': 'Forecast'}))
 
-            future = model.make_future_dataframe(periods=12, freq='M')
-            forecast = model.predict(future)
-            forecast_range = forecast[(forecast['ds'] >= '2025-05-01') & (forecast['ds'] <= '2026-04-30')]
+            except Exception as e:
+                st.error(f"Could not process {part}: {e}")
 
-            for _, row in forecast_range.iterrows():
-                all_results.append({
-                    'Part': part,
-                    'Month': row['ds'],
-                    'Sales': np.nan,
-                    'Forecast': round(row['yhat'], 2)
-                })
-        except Exception as e:
-            for month in pd.date_range(start='2025-05-01', end='2026-04-30', freq='MS'):
-                all_results.append({
-                    'Part': part,
-                    'Month': month,
-                    'Sales': np.nan,
-                    'Forecast': f'Error: {e}'
-                })
+        if all_forecasts:
+            result = pd.concat(all_forecasts)
+            st.download_button("📥 Download Forecast CSV", result.to_csv(index=False), file_name="12_month_forecast.csv")
 
-    result_df = pd.DataFrame(all_results)
-
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        result_df.to_excel(writer, sheet_name='Forecast vs Actual', index=False)
-    output.seek(0)
-
-    st.download_button(
-        label="📥 Download Excel File",
-        data=output,
-        file_name="Actual_vs_Forecast_2025_2026.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    else:
+        st.error("Excel must contain: Part, Month, Sales")
