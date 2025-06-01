@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from prophet import Prophet
 import matplotlib.pyplot as plt
+from io import BytesIO
 
 st.title("🔮 Spare Parts Sales Forecast (Meta Prophet - 12 Months)")
 
@@ -12,7 +13,7 @@ if uploaded_file:
 
     if {'Part', 'Month', 'Sales'}.issubset(df.columns):
         df['Month'] = pd.to_datetime(df['Month'])
-        all_forecasts = []
+        all_results = []
 
         for part in df['Part'].unique():
             st.subheader(f"📦 {part}")
@@ -28,17 +29,31 @@ if uploaded_file:
                 fig1 = model.plot(forecast)
                 st.pyplot(fig1)
 
-                forecast_trimmed = forecast[['ds', 'yhat']].tail(12)
+                forecast_trimmed = forecast[['ds', 'yhat']].rename(columns={'ds': 'Month', 'yhat': 'Forecast'})
                 forecast_trimmed['Part'] = part
-                all_forecasts.append(forecast_trimmed.rename(columns={'ds': 'Month', 'yhat': 'Forecast'}))
+
+                # Merge actual and forecast data for comparison
+                actual_data = part_data.rename(columns={'ds': 'Month', 'y': 'Sales'})
+                merged = pd.merge(forecast_trimmed, actual_data, on=['Part', 'Month'], how='left')
+
+                all_results.append(merged)
 
             except Exception as e:
                 st.error(f"Could not process {part}: {e}")
 
-        if all_forecasts:
-            result = pd.concat(all_forecasts)
-            st.download_button("📥 Download Forecast CSV", result.to_csv(index=False), file_name="12_month_forecast.csv")
+        if all_results:
+            final_result = pd.concat(all_results)
 
+            # Prepare Excel in memory
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                final_result.to_excel(writer, sheet_name='Forecast vs Actual', index=False)
+
+            st.download_button(
+                label="📥 Download Excel: Forecast vs Actual",
+                data=output.getvalue(),
+                file_name="spare_parts_forecast_vs_actual.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
     else:
         st.error("Excel must contain: Part, Month, Sales")
-
