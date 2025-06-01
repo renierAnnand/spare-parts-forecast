@@ -1,6 +1,6 @@
 streamlit
 prophet
 pandas
+numpy
 openpyxl
-scikit-learn
-matplotlib
+xlsxwriter
