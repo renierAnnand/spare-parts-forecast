@@ -50,14 +50,25 @@ if uploaded_file:
                 
                 part_data = df_grouped[df_grouped['Part'] == part][['Month', 'Sales']].dropna()
                 
-                # Check if we have enough data (at least 24 months)
+                # First, add all historical data (Jan 2022 - April 2025)
+                for _, row in part_data.iterrows():
+                    all_results.append({
+                        'Part': part,
+                        'Month': row['Month'],
+                        'Actual_Sales': row['Sales'],
+                        'Predicted_Sales': np.nan,
+                        'Type': 'Historical'
+                    })
+                
+                # Check if we have enough data for forecasting (at least 24 months)
                 if part_data['Month'].nunique() < 24:
                     for month in pd.date_range(start='2025-05-01', end='2026-04-30', freq='MS'):
                         all_results.append({
                             'Part': part,
                             'Month': month,
-                            'Sales': np.nan,
-                            'Forecast': 'Not enough data (need 24+ months)'
+                            'Actual_Sales': np.nan,
+                            'Predicted_Sales': 'Not enough data (need 24+ months)',
+                            'Type': 'Forecast'
                         })
                     continue
                 
@@ -82,13 +93,14 @@ if uploaded_file:
                     # Extract forecast for May 2025 - April 2026
                     forecast_range = forecast[(forecast['ds'] >= '2025-05-01') & (forecast['ds'] <= '2026-04-30')]
                     
-                    # FIXED: Corrected the syntax error here
+                    # Add future predictions
                     for _, row in forecast_range.iterrows():
                         all_results.append({
                             'Part': part,
                             'Month': row['ds'],
-                            'Sales': np.nan,
-                            'Forecast': round(max(0, row['yhat']), 2)  # Ensure non-negative forecasts
+                            'Actual_Sales': np.nan,
+                            'Predicted_Sales': round(max(0, row['yhat']), 2),  # Ensure non-negative forecasts
+                            'Type': 'Forecast'
                         })
                         
                 except Exception as e:
@@ -97,8 +109,9 @@ if uploaded_file:
                         all_results.append({
                             'Part': part,
                             'Month': month,
-                            'Sales': np.nan,
-                            'Forecast': f'Error: {str(e)}'
+                            'Actual_Sales': np.nan,
+                            'Predicted_Sales': f'Error: {str(e)}',
+                            'Type': 'Forecast'
                         })
             
             # Clear progress indicators
@@ -108,24 +121,45 @@ if uploaded_file:
             # Create results dataframe
             result_df = pd.DataFrame(all_results)
             
+            # Sort by Part and Month for better organization
+            result_df = result_df.sort_values(['Part', 'Month']).reset_index(drop=True)
+            
             # Display summary
             st.success("Forecasting completed!")
-            st.write(f"Generated forecasts for {len(result_df)} part-month combinations")
+            historical_count = len(result_df[result_df['Type'] == 'Historical'])
+            forecast_count = len(result_df[result_df['Type'] == 'Forecast'])
+            st.write(f"Generated {historical_count} historical records and {forecast_count} forecast records")
+            
+            # Show summary statistics
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Historical Data Summary:**")
+                historical_data = result_df[result_df['Type'] == 'Historical']
+                if not historical_data.empty:
+                    st.write(f"- Date range: {historical_data['Month'].min().strftime('%Y-%m')} to {historical_data['Month'].max().strftime('%Y-%m')}")
+                    st.write(f"- Total records: {len(historical_data)}")
+            
+            with col2:
+                st.write("**Forecast Data Summary:**")
+                forecast_data = result_df[result_df['Type'] == 'Forecast']
+                if not forecast_data.empty:
+                    st.write(f"- Date range: {forecast_data['Month'].min().strftime('%Y-%m')} to {forecast_data['Month'].max().strftime('%Y-%m')}")
+                    st.write(f"- Total records: {len(forecast_data)}")
             
             # Show preview of results
-            st.write("Forecast preview:")
-            st.dataframe(result_df.head(10))
+            st.write("**Data preview:**")
+            st.dataframe(result_df.head(15))
             
             # Create Excel file for download
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                result_df.to_excel(writer, sheet_name='Forecast vs Actual', index=False)
+                result_df.to_excel(writer, sheet_name='Sales Data & Forecasts', index=False)
                 
                 # Add some formatting
                 workbook = writer.book
-                worksheet = writer.sheets['Forecast vs Actual']
+                worksheet = writer.sheets['Sales Data & Forecasts']
                 
-                # Format headers
+                # Define formats
                 header_format = workbook.add_format({
                     'bold': True,
                     'text_wrap': True,
@@ -134,8 +168,32 @@ if uploaded_file:
                     'border': 1
                 })
                 
+                historical_format = workbook.add_format({
+                    'fg_color': '#E8F4FD',
+                    'border': 1
+                })
+                
+                forecast_format = workbook.add_format({
+                    'fg_color': '#FFF2CC',
+                    'border': 1
+                })
+                
+                # Format headers
                 for col_num, value in enumerate(result_df.columns.values):
                     worksheet.write(0, col_num, value, header_format)
+                
+                # Apply conditional formatting based on Type
+                for row_num, row_data in enumerate(result_df.itertuples(), 1):
+                    if row_data.Type == 'Historical':
+                        for col_num in range(len(result_df.columns)):
+                            worksheet.write(row_num, col_num, 
+                                          getattr(row_data, result_df.columns[col_num], ''), 
+                                          historical_format)
+                    elif row_data.Type == 'Forecast':
+                        for col_num in range(len(result_df.columns)):
+                            worksheet.write(row_num, col_num, 
+                                          getattr(row_data, result_df.columns[col_num], ''), 
+                                          forecast_format)
                 
                 # Auto-adjust column widths
                 for i, col in enumerate(result_df.columns):
@@ -144,13 +202,19 @@ if uploaded_file:
                         len(str(col))
                     ) + 2
                     worksheet.set_column(i, i, max_length)
+                
+                # Add a legend
+                legend_row = len(result_df) + 3
+                worksheet.write(legend_row, 0, "Legend:", header_format)
+                worksheet.write(legend_row + 1, 0, "Historical Data", historical_format)
+                worksheet.write(legend_row + 2, 0, "Forecast Data", forecast_format)
             
             output.seek(0)
             
             st.download_button(
-                label="📥 Download Excel File",
+                label="📥 Download Excel File (Historical + Forecasts)",
                 data=output,
-                file_name="Actual_vs_Forecast_2025_2026.xlsx",
+                file_name="Sales_Historical_and_Forecasts_2022_2026.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             
