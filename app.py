@@ -165,7 +165,7 @@ if uploaded_file:
                     for j, month in enumerate(forecast_months):
                         month_key = month.strftime('%b-%Y')
                         forecast_value = forecast.iloc[j]['yhat']
-                        row_data[month_key] = int(round(max(0, forecast_value), 0))  # Round to whole numbers, ensure non-negative
+                        row_data[month_key] = int(round(max(0, forecast_value), 0))
                     
                 except Exception as e:
                     # Add forecast columns with error message
@@ -206,70 +206,122 @@ if uploaded_file:
         # Clean the result dataframe to handle NaN values before writing to Excel
         result_df_clean = result_df.fillna('')
         
+        # Restructure the data to match your desired output format
+        # Create the header structure you want
+        restructured_data = []
+        
+        # First, create the header rows
+        month_headers = ['Item Code']
+        data_type_headers = ['']
+        
+        # Get all month columns (excluding Item Code)
+        month_columns = [col for col in result_df_clean.columns if col != 'Item Code']
+        
+        for month_col in month_columns:
+            month_headers.append(month_col)
+            # Determine if it's historical or forecast based on year
+            if any(year in month_col for year in ['2022', '2023']):
+                data_type_headers.append('Historical QTY')
+            else:
+                data_type_headers.append('Forecasted QTY')
+        
+        # Add the header rows to restructured data
+        restructured_data.append(month_headers)
+        restructured_data.append(data_type_headers)
+        
+        # Add all the part data
+        for _, row in result_df_clean.iterrows():
+            data_row = []
+            for col in result_df_clean.columns:
+                data_row.append(row[col])
+            restructured_data.append(data_row)
+        
+        # Convert to DataFrame for easier Excel writing
+        max_cols = max(len(row) for row in restructured_data)
+        for row in restructured_data:
+            while len(row) < max_cols:
+                row.append('')
+        
+        restructured_df = pd.DataFrame(restructured_data)
+        
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            result_df_clean.to_excel(writer, sheet_name='Sales Forecast', index=False)
+            restructured_df.to_excel(writer, sheet_name='Sales Forecast', index=False, header=False)
             
             # Add formatting
             workbook = writer.book
             worksheet = writer.sheets['Sales Forecast']
             
             # Define formats
-            header_format = workbook.add_format({
+            month_header_format = workbook.add_format({
                 'bold': True,
                 'text_wrap': True,
                 'valign': 'top',
+                'align': 'center',
                 'fg_color': '#D7E4BC',
+                'border': 1
+            })
+            
+            data_type_header_format = workbook.add_format({
+                'bold': True,
+                'text_wrap': True,
+                'valign': 'top',
+                'align': 'center',
+                'fg_color': '#F2F2F2',
                 'border': 1,
-                'align': 'center'
+                'font_size': 9
             })
             
             item_code_format = workbook.add_format({
                 'bold': True,
                 'fg_color': '#F2F2F2',
-                'border': 1
+                'border': 1,
+                'align': 'left'
             })
             
             historical_format = workbook.add_format({
                 'fg_color': '#E8F4FD',
                 'border': 1,
-                'align': 'right'
+                'align': 'right',
+                'num_format': '#,##0'
             })
             
             forecast_format = workbook.add_format({
                 'fg_color': '#FFF2CC',
                 'border': 1,
-                'align': 'right'
+                'align': 'right',
+                'num_format': '#,##0'
             })
             
-            # Format headers
-            for col_num, column_name in enumerate(result_df_clean.columns):
-                worksheet.write(0, col_num, column_name, header_format)
+            # Format the month header row (row 0)
+            for col_num in range(len(month_headers)):
+                worksheet.write(0, col_num, month_headers[col_num], month_header_format)
             
-            # Format data rows
-            for row_num in range(1, len(result_df_clean) + 1):
-                for col_num, column_name in enumerate(result_df_clean.columns):
-                    cell_value = result_df_clean.iloc[row_num-1, col_num]
+            # Format the data type header row (row 1)
+            for col_num in range(len(data_type_headers)):
+                worksheet.write(1, col_num, data_type_headers[col_num], data_type_header_format)
+            
+            # Format data rows (starting from row 2)
+            for row_num in range(2, len(restructured_data)):
+                for col_num in range(len(restructured_data[row_num])):
+                    cell_value = restructured_data[row_num][col_num]
                     
-                    if column_name == 'Item Code':
+                    if col_num == 0:  # Item Code column
                         worksheet.write(row_num, col_num, cell_value, item_code_format)
-                    elif any(year in column_name for year in ['2022', '2023']):  # Historical data
-                        worksheet.write(row_num, col_num, cell_value, historical_format)
-                    elif any(year in column_name for year in ['2024', '2025']):  # Forecast data
-                        worksheet.write(row_num, col_num, cell_value, forecast_format)
                     else:
-                        worksheet.write(row_num, col_num, cell_value)
+                        # Check if this column is historical or forecast
+                        month_col = month_headers[col_num] if col_num < len(month_headers) else ''
+                        if any(year in str(month_col) for year in ['2022', '2023']):
+                            worksheet.write(row_num, col_num, cell_value, historical_format)
+                        else:
+                            worksheet.write(row_num, col_num, cell_value, forecast_format)
             
             # Auto-adjust column widths
-            for i, col in enumerate(result_df_clean.columns):
-                if col == 'Item Code':
-                    worksheet.set_column(i, i, 20)  # Wider for item codes
-                else:
-                    worksheet.set_column(i, i, 12)  # Standard width for data columns
+            worksheet.set_column(0, 0, 20)  # Item Code column wider
+            for col_num in range(1, max_cols):
+                worksheet.set_column(col_num, col_num, 12)  # Standard width for data columns
             
-            # Add header row to distinguish historical vs forecast
-            forecast_start_col = len([col for col in result_df_clean.columns if any(year in col for year in ['2022', '2023'])]) + 1
-            if forecast_start_col < len(result_df_clean.columns):
-                worksheet.merge_range(0, forecast_start_col, 0, len(result_df_clean.columns)-1, 'Forecasted Data (2024-2025)', forecast_format)
+            # Freeze panes to keep headers visible
+            worksheet.freeze_panes(2, 1)  # Freeze first 2 rows and first column
         
         output.seek(0)
         
