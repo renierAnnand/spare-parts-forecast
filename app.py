@@ -1,4 +1,9 @@
 import streamlit as st
+
+# MUST BE FIRST: Set page config before any other Streamlit commands
+st.set_page_config(layout="wide", page_title="Spare Parts Forecast", page_icon="📈")
+
+# Now import other libraries
 import pandas as pd
 import numpy as np
 import io
@@ -15,8 +20,6 @@ except ImportError:
     EXCEL_ENGINE = "openpyxl"
     XLSXWRITER_AVAILABLE = False
     st.warning("⚠️ xlsxwriter not available. Using openpyxl for Excel export (limited formatting).")
-
-st.set_page_config(layout="wide", page_title="Spare Parts Forecast", page_icon="📈")
 st.title("📈 Spare Parts Forecast (MH-Family SARIMA with Log Transform)")
 
 # —————————————————————————————
