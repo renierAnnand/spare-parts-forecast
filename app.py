@@ -29,20 +29,21 @@ st.title("📈 Spare Parts Forecast (MH-Family SARIMA with Log Transform)")
 st.write(
     """
     **Step 1 – Upload your data files**  
-    - **Parts × Family × Month × Sales:**  
-      Columns: `Part`, `Family`, `Month`, `Sales`.  
-      (e.g. "Fork_001", "Linde-Forks", "2023-05-01", 12)  
+    - **Parts × Month × Sales:**  
+      Columns: `Part`, `Month`, `Sales`.  
+      (e.g. "13-21707134.GN", "2023-05-01", 12)  
+      *Note: Family will be auto-extracted from part suffixes (e.g., .GN, .IP, .IT, .FG)*
     - **FleetHours (optional):**  
       Columns: `Month`, `FleetHours` (total MH-fleet runtime in Saudi Arabia).  
       This will be used as an exogenous regressor (usage often drops during Ramadan/Eid).
     """
 )
 
-uploaded_parts = st.file_uploader("Upload Parts×Family×Month×Sales file", type=["xlsx", "csv"])
+uploaded_parts = st.file_uploader("Upload Parts×Month×Sales file", type=["xlsx", "csv"])
 uploaded_exog  = st.file_uploader("Upload FleetHours file (Month, FleetHours) (Optional)", type=["xlsx", "csv"])
 
 if not uploaded_parts:
-    st.info("📥 Please upload the Parts×Family×Month×Sales file to proceed.")
+    st.info("📥 Please upload the Parts×Month×Sales file to proceed.")
     st.stop()
 
 # —————————————————————————————
@@ -73,22 +74,38 @@ def load_exog_df(f):
 
 df = load_parts_df(uploaded_parts)
 
-# Validate required columns
-required_cols = {"Part", "Family", "Month", "Sales"}
+# Check for required columns and auto-generate Family if missing
+required_cols = {"Part", "Month", "Sales"}
 if not required_cols.issubset(df.columns):
     st.error(f"❌ Your file must contain columns: {required_cols}. Found: {list(df.columns)}")
     st.stop()
 
 # Data cleaning and validation
 original_shape = df.shape
-df = df.dropna(subset=["Part", "Family", "Month", "Sales"]).copy()
+df = df.dropna(subset=["Part", "Month", "Sales"]).copy()
 
 if df.empty:
     st.error("❌ No valid data found after removing rows with missing values.")
     st.stop()
 
 df["Part"]   = df["Part"].astype(str).str.strip()
-df["Family"] = df["Family"].astype(str).str.strip()
+
+# Auto-generate Family column from part suffixes if not present
+if "Family" not in df.columns:
+    st.info("🔄 Family column not found. Auto-generating families from part suffixes...")
+    
+    def extract_family(part):
+        """Extract family from part number suffix (e.g., 13-21707134.GN -> GN)"""
+        if '.' in str(part):
+            return str(part).split('.')[-1].strip()
+        else:
+            # If no suffix, use first part of the part number
+            return str(part).split('-')[0] if '-' in str(part) else 'MISC'
+    
+    df["Family"] = df["Part"].apply(extract_family)
+    st.success(f"✅ Generated {df['Family'].nunique()} families: {sorted(df['Family'].unique())}")
+else:
+    df["Family"] = df["Family"].astype(str).str.strip()
 
 # Parse Month → datetime (coerce invalid)
 df["Month"] = pd.to_datetime(df["Month"], errors="coerce")
@@ -101,12 +118,14 @@ if df.empty:
     st.error("❌ No valid data found after date parsing.")
     st.stop()
 
+# Convert to first day of month for consistency
+df["Month"] = df["Month"].dt.to_period('M').dt.start_time
+
 # Convert sales to numeric and handle negatives
 df["Sales"] = pd.to_numeric(df["Sales"], errors="coerce").fillna(0)
 negative_sales = (df["Sales"] < 0).sum()
 if negative_sales > 0:
-    st.warning(f"⚠️ Found {negative_sales} negative sales values. Converting to 0.")
-    df["Sales"] = df["Sales"].clip(lower=0)
+    st.warning(f"⚠️ Found {negative_sales} negative sales values. Keeping them as-is (may indicate returns/adjustments).")
 
 df["Sales"] = df["Sales"].astype(float)
 
@@ -119,9 +138,15 @@ if unique_parts > 1000:
     st.info("💡 Consider processing in smaller batches for better performance.")
 
 st.write(f"Data shape: {original_shape} → {df.shape} (after cleaning)")
-st.write(f"Unique parts: {unique_parts}, Unique families: {df['Family'].nunique()}")
-st.write("Preview of uploaded data:")
-st.dataframe(df.head())
+st.write(f"📊 **Data Summary:**")
+st.write(f"- Unique parts: {df['Part'].nunique()}")
+st.write(f"- Unique families: {df['Family'].nunique()} → {sorted(df['Family'].unique())}")
+st.write(f"- Date range: {df['Month'].min().strftime('%Y-%m')} to {df['Month'].max().strftime('%Y-%m')}")
+st.write(f"- Total sales: {df['Sales'].sum():,.0f}")
+
+st.write("Preview of processed data:")
+preview_df = df.head()
+st.dataframe(preview_df)
 
 # —————————————————————————————
 # 3) Load Optional Exogenous (FleetHours) + Build Ramadan Flag
