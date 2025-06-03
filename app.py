@@ -1,127 +1,105 @@
-# app.py
-
 """
-Streamlit app for forecasting spare‐parts sales (monthly) and comparing 2024 forecasts
-against actuals. Uses SARIMA (via pmdarima) and Prophet, then creates a simple ensemble.
+Streamlit app for forecasting spare‐parts sales (monthly) in 2024 and comparing
+multiple models against actuals. Supports SARIMA, Prophet, ETS, and XGBoost,
+plus a simple ensemble of all selected forecasts.
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
+# Forecasting libraries
 from prophet import Prophet
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.seasonal import seasonal_decompose
-import warnings
-warnings.filterwarnings('ignore')
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
-# Set up logging
-logging.getLogger('prophet').setLevel(logging.WARNING)
-logging.getLogger('pmdarima').setLevel(logging.WARNING)
+# Machine learning libraries
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.preprocessing import OneHotEncoder
+
+import warnings
+warnings.filterwarnings("ignore")
 
 # ----------------------------
 # Helper functions
 # ----------------------------
 
 @st.cache_data
+def load_data(uploaded_file):
+    """
+    Load any Excel file with at least ['Month','Sales'] columns,
+    parse dates, aggregate to total monthly sales, and return a sorted DataFrame.
+    """
+    df = pd.read_excel(uploaded_file)
+    # Basic validation
+    if "Month" not in df.columns or "Sales" not in df.columns:
+        st.error("Uploaded file must contain 'Month' and 'Sales' columns.")
+        return None
+
+    df["Month"] = pd.to_datetime(df["Month"], errors="coerce")
+    if df["Month"].isna().any():
+        st.error("Some 'Month' values could not be parsed as dates.")
+        return None
+
+    # Convert Sales to numeric
+    df["Sales"] = pd.to_numeric(df["Sales"], errors="coerce").fillna(0)
+    df["Sales"] = df["Sales"].abs()  # ensure non-negative
+
+    # Aggregate to total monthly sales (in case there are many part‐level rows)
+    monthly = (
+        df.groupby("Month", as_index=False)["Sales"]
+        .sum()
+        .sort_values("Month")
+        .reset_index(drop=True)
+    )
+    return monthly
+
+
+@st.cache_data
 def load_actual_2024_data(uploaded_file, forecast_year):
     """
-    Load the 2024 actual data file and return aggregated monthly sales.
+    Load a separate 2024‐actuals file (same format, 'Month' & 'Sales'), filter to forecast_year only,
+    and return aggregated monthly sales. If no data found, return None.
     """
     try:
         df = pd.read_excel(uploaded_file)
-        
-        # Validate required columns
-        required_cols = ['Month', 'Sales']
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        if missing_cols:
-            raise ValueError(f"Missing required columns: {missing_cols}")
-        
-        # Ensure 'Month' is parsed as datetime
-        df['Month'] = pd.to_datetime(df['Month'], errors='coerce')
-        
-        # Check for invalid dates
-        if df['Month'].isna().any():
-            raise ValueError("Some dates in 'Month' column could not be parsed")
-        
-        # Ensure 'Sales' is numeric and non-negative
-        df['Sales'] = pd.to_numeric(df['Sales'], errors='coerce')
-        if df['Sales'].isna().any():
-            st.warning("Some sales values could not be converted to numbers. These will be treated as 0.")
-            df['Sales'] = df['Sales'].fillna(0)
-        
-        # Handle negative sales
-        if (df['Sales'] < 0).any():
-            st.warning("Negative sales values detected. Converting to absolute values.")
-            df['Sales'] = df['Sales'].abs()
-        
-        # Filter for the forecast year only
-        forecast_start = pd.Timestamp(f"{forecast_year}-01-01")
-        forecast_end = pd.Timestamp(f"{forecast_year+1}-01-01")
-        
-        df_filtered = df[
-            (df['Month'] >= forecast_start) & 
-            (df['Month'] < forecast_end)
-        ]
-        
-        if len(df_filtered) == 0:
-            raise ValueError(f"No data found for {forecast_year} in the uploaded file")
-        
-        # Aggregate total sales per month
-        monthly = df_filtered.groupby('Month', as_index=False)['Sales'].sum().sort_values('Month')
-        
-        # Remove months with zero sales
-        monthly = monthly[monthly['Sales'] > 0]
-        
-        return monthly
-        
-    except Exception as e:
-        st.error(f"Error loading 2024 actual data: {str(e)}")
+    except Exception:
+        st.error("Could not read the 2024 actuals file.")
         return None
-    """
-    Load the uploaded Excel file into a DataFrame, parse dates, and aggregate monthly sales.
-    Expects a sheet with at least columns: 'Month' and 'Sales'.
-    """
-    try:
-        df = pd.read_excel(uploaded_file)
-        
-        # Validate required columns
-        required_cols = ['Month', 'Sales']
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        if missing_cols:
-            raise ValueError(f"Missing required columns: {missing_cols}")
-        
-        # Ensure 'Month' is parsed as datetime
-        df['Month'] = pd.to_datetime(df['Month'], errors='coerce')
-        
-        # Check for invalid dates
-        if df['Month'].isna().any():
-            raise ValueError("Some dates in 'Month' column could not be parsed")
-        
-        # Ensure 'Sales' is numeric and non-negative
-        df['Sales'] = pd.to_numeric(df['Sales'], errors='coerce')
-        if df['Sales'].isna().any():
-            st.warning("Some sales values could not be converted to numbers. These will be treated as 0.")
-            df['Sales'] = df['Sales'].fillna(0)
-        
-        # Handle negative sales
-        if (df['Sales'] < 0).any():
-            st.warning("Negative sales values detected. Converting to absolute values.")
-            df['Sales'] = df['Sales'].abs()
-        
-        # Aggregate total sales per month across all parts
-        monthly = df.groupby('Month', as_index=False)['Sales'].sum().sort_values('Month')
-        
-        # Remove months with zero sales
-        monthly = monthly[monthly['Sales'] > 0]
-        
-        return monthly
-        
-    except Exception as e:
-        st.error(f"Error loading data: {str(e)}")
+
+    if "Month" not in df.columns or "Sales" not in df.columns:
+        st.error("Actual‐2024 file must contain 'Month' and 'Sales'.")
         return None
+
+    df["Month"] = pd.to_datetime(df["Month"], errors="coerce")
+    if df["Month"].isna().any():
+        st.error("Some dates in the 2024 actuals file could not be parsed.")
+        return None
+
+    df["Sales"] = pd.to_numeric(df["Sales"], errors="coerce").fillna(0)
+    df["Sales"] = df["Sales"].abs()
+
+    # Filter to the forecast year (e.g. 2024)
+    start = pd.Timestamp(f"{forecast_year}-01-01")
+    end = pd.Timestamp(f"{forecast_year+1}-01-01")
+    df = df[(df["Month"] >= start) & (df["Month"] < end)]
+    if df.empty:
+        st.warning(f"No rows in the 2024 actuals file match year {forecast_year}.")
+        return None
+
+    monthly = (
+        df.groupby("Month", as_index=False)["Sales"]
+        .sum()
+        .sort_values("Month")
+        .reset_index(drop=True)
+    )
+    return monthly.rename(columns={"Sales": f"Actual_{forecast_year}"})
+
 
 def determine_sarima_order(ts, seasonal_period=12):
     """
@@ -134,10 +112,11 @@ def determine_sarima_order(ts, seasonal_period=12):
     except:
         return (0, 1, 0), (0, 1, 0, seasonal_period)
 
+
 def train_sarima(train_series, seasonal_period=12):
     """
-    Fit a SARIMA model on the provided train_series using statsmodels.
-    Returns the fitted model or None if training fails.
+    Fit a SARIMA model using statsmodels.SARIMAX with proven default parameters.
+    Returns fitted model or None if training fails.
     """
     try:
         # Validate input
@@ -148,7 +127,7 @@ def train_sarima(train_series, seasonal_period=12):
         if train_series.var() == 0:
             raise ValueError("Sales data is constant - cannot fit SARIMA model")
         
-        # Determine SARIMA parameters
+        # Use proven SARIMA parameters
         order, seasonal_order = determine_sarima_order(train_series, seasonal_period)
         
         # Fit SARIMA model
@@ -167,342 +146,526 @@ def train_sarima(train_series, seasonal_period=12):
         st.error(f"SARIMA training failed: {str(e)}")
         return None
 
-@st.cache_data
-def forecast_sarima(_model, n_periods, last_date):
+
+def forecast_sarima(fitted_model, n_periods, last_date):
     """
-    Given a fitted SARIMA model, forecast n_periods ahead.
-    last_date: Timestamp of the last training month (e.g., 2023-12-01).
-    Returns a DataFrame with 'Month' and 'SARIMA_Forecast'.
+    Forecast n_periods months ahead from last_date using a fitted SARIMA.
+    Returns DataFrame with 'Month','SARIMA_Forecast','SARIMA_Lower','SARIMA_Upper'.
     """
-    if _model is None:
+    if fitted_model is None:
         return None
-    
+
     try:
-        # Get forecast
-        forecast_result = _model.forecast(steps=n_periods)
-        conf_int = _model.get_forecast(steps=n_periods).conf_int()
-        
-        # Ensure predictions are non-negative
-        preds = np.maximum(forecast_result.values, 0)
-        
-        # Build the future months index
-        future_months = pd.date_range(start=last_date + pd.offsets.MonthBegin(1), 
-                                      periods=n_periods, freq='MS')
-        
-        df_forecast = pd.DataFrame({
-            'Month': future_months,
-            'SARIMA_Forecast': preds,
-            'SARIMA_Lower': np.maximum(conf_int.iloc[:, 0], 0),
-            'SARIMA_Upper': conf_int.iloc[:, 1]
-        })
-        return df_forecast
+        # get predictions + conf_int
+        pred = fitted_model.get_forecast(steps=n_periods)
+        forecast_vals = pred.predicted_mean.clip(lower=0).values
+        ci = pred.conf_int().values
+        lower = np.maximum(ci[:, 0], 0)
+        upper = np.maximum(ci[:, 1], 0)
+
+        future_months = pd.date_range(
+            start=last_date + pd.offsets.MonthBegin(1), periods=n_periods, freq="MS"
+        )
+        return pd.DataFrame(
+            {
+                "Month": future_months,
+                "SARIMA_Forecast": forecast_vals,
+                "SARIMA_Lower": lower,
+                "SARIMA_Upper": upper,
+            }
+        )
     except Exception as e:
         st.error(f"SARIMA forecasting failed: {str(e)}")
         return None
 
+
 def train_prophet(train_df):
     """
-    Fit a Prophet model on the provided train_df with columns ['ds','y'].
-    Returns the fitted model or None if training fails.
+    Fit a Prophet model on a DataFrame with columns ['ds','y'].
+    Returns the fitted Prophet instance.
+    """
+    if len(train_df) < 24:
+        st.warning("Less than 24 months of data: Prophet may underperform.")
+    m = Prophet(
+        yearly_seasonality=True,
+        weekly_seasonality=False,
+        daily_seasonality=False,
+        seasonality_mode="multiplicative",
+        changepoint_prior_scale=0.05,
+    )
+    with st.spinner("Training Prophet..."):
+        m.fit(train_df)
+    return m
+
+
+def forecast_prophet(m, periods, last_date):
+    """
+    Forecast with Prophet for `periods` months beyond last_date.
+    Returns DataFrame with ['Month','Prophet_Forecast','Prophet_Lower','Prophet_Upper'].
+    """
+    if m is None:
+        return None
+    future = pd.DataFrame(
+        {"ds": pd.date_range(start=last_date + pd.offsets.MonthBegin(1), periods=periods, freq="MS")}
+    )
+    fc = m.predict(future)
+    df = fc[["ds", "yhat", "yhat_lower", "yhat_upper"]].copy()
+    df["yhat"] = df["yhat"].clip(lower=0)
+    df["yhat_lower"] = df["yhat_lower"].clip(lower=0)
+    df["yhat_upper"] = df["yhat_upper"].clip(lower=0)
+    return df.rename(
+        columns={
+            "ds": "Month",
+            "yhat": "Prophet_Forecast",
+            "yhat_lower": "Prophet_Lower",
+            "yhat_upper": "Prophet_Upper",
+        }
+    )
+
+
+def train_ets(train_series, seasonal_period=12):
+    """
+    Fit a Holt-Winters ETS model (multiplicative seasonality by default). Returns fitted model.
     """
     try:
-        # Validate input
-        if len(train_df) < 24:  # Need at least 2 years for good seasonality
-            st.warning("Limited data for Prophet. Results may be unreliable.")
-        
-        m = Prophet(
-            yearly_seasonality=True, 
-            weekly_seasonality=False, 
-            daily_seasonality=False,
-            seasonality_mode='multiplicative',  # Often better for sales data
-            changepoint_prior_scale=0.05  # More conservative changepoint detection
+        # If variance is zero (constant series), skip
+        if train_series.var() == 0:
+            st.warning("Series is constant: ETS will simply hold level.")
+        # Multiplicative seasonality is common for sales
+        model = ExponentialSmoothing(
+            train_series,
+            trend="add",
+            seasonal="mul",
+            seasonal_periods=seasonal_period,
         )
-        
-        # Suppress Prophet's verbose output
-        with st.spinner("Training Prophet model..."):
-            m.fit(train_df)
-        
-        return m
+        fitted = model.fit(optimized=True)
+        return fitted
     except Exception as e:
-        st.error(f"Prophet training failed: {str(e)}")
+        st.error(f"ETS training failed: {str(e)}")
         return None
+
+
+def forecast_ets(fitted_model, n_periods, last_date):
+    """
+    Forecast n_periods months ahead from last_date using a fitted ETS model.
+    Returns DataFrame with ['Month','ETS_Forecast'].
+    """
+    if fitted_model is None:
+        return None
+    try:
+        forecast_vals = fitted_model.forecast(steps=n_periods).clip(lower=0).values
+        future_months = pd.date_range(
+            start=last_date + pd.offsets.MonthBegin(1), periods=n_periods, freq="MS"
+        )
+        return pd.DataFrame({"Month": future_months, "ETS_Forecast": forecast_vals})
+    except Exception as e:
+        st.error(f"ETS forecasting failed: {str(e)}")
+        return None
+
 
 @st.cache_data
-def forecast_prophet(_model, periods, last_date):
+def create_ml_features(df):
     """
-    Given a fitted Prophet model, forecast `periods` months ahead.
-    last_date: Timestamp of the last training month (e.g., 2023-12-01).
-    Returns a DataFrame with 'Month' and 'Prophet_Forecast'.
+    Given a DataFrame with ['Month','Sales'], create lag/rolling/month‐of‐year features
+    for XGBoost. Returns features DataFrame (indexed by Month) and target Series.
     """
-    if _model is None:
-        return None
-    
+    df = df.copy().set_index("Month").asfreq("MS")
+    df["lag_1"] = df["Sales"].shift(1)
+    df["lag_12"] = df["Sales"].shift(12)
+    df["rolling_mean_3"] = df["Sales"].shift(1).rolling(window=3).mean()
+    # cyclical month encoding
+    df["month"] = df.index.month
+    df["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
+    df["month_cos"] = np.cos(2 * np.pi * df["month"] / 12)
+
+    # Drop rows with NaNs due to shifts
+    features = df.dropna().copy()
+    X = features[["lag_1", "lag_12", "rolling_mean_3", "month_sin", "month_cos"]]
+    y = features["Sales"]
+    return X, y
+
+
+def train_xgboost(train_df):
+    """
+    Train an XGBoost (GradientBoostingRegressor) on lagged features. Returns the trained model
+    and the last 12 months of features (to be used for recursive forecasting).
+    """
     try:
-        # Create a dataframe with future periods in monthly frequency
-        future = pd.DataFrame({'ds': pd.date_range(start=last_date + pd.offsets.MonthBegin(1),
-                                                   periods=periods,
-                                                   freq='MS')})
-        forecast = _model.predict(future)
-        
-        # Extract relevant columns and ensure non-negative forecasts
-        df_forecast = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].copy()
-        df_forecast['yhat'] = np.maximum(df_forecast['yhat'], 0)
-        df_forecast = df_forecast.rename(columns={
-            'ds': 'Month', 
-            'yhat': 'Prophet_Forecast',
-            'yhat_lower': 'Prophet_Lower',
-            'yhat_upper': 'Prophet_Upper'
-        })
-        return df_forecast
+        # Prepare features and target
+        X, y = create_ml_features(train_df[["Month", "Sales"]])
+        if len(X) < 12:
+            st.warning("Too few rows after feature engineering: XGBoost may not train properly.")
+        # Use TimeSeriesSplit to tune lightly
+        splitter = TimeSeriesSplit(n_splits=3)
+        best_model = None
+        best_score = np.inf
+
+        for train_idx, val_idx in splitter.split(X):
+            X_tr, X_val = X.iloc[train_idx], X.iloc[val_idx]
+            y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
+            model = GradientBoostingRegressor(
+                n_estimators=200, learning_rate=0.05, max_depth=3, random_state=42
+            )
+            model.fit(X_tr, y_tr)
+            preds = model.predict(X_val)
+            score = mean_absolute_error(y_val, preds)
+            if score < best_score:
+                best_score = score
+                best_model = model
+
+        # Finally, retrain on entire set
+        best_model.fit(X, y)
+        # Save the last 12 months of df (for recursive forecast)
+        last_12 = train_df.set_index("Month").asfreq("MS")["Sales"].iloc[-12:]
+        return best_model, last_12
     except Exception as e:
-        st.error(f"Prophet forecasting failed: {str(e)}")
+        st.error(f"XGBoost training failed: {str(e)}")
+        return None, None
+
+
+def forecast_xgboost(model, last_12_series, n_periods):
+    """
+    Recursively forecast n_periods months ahead using the trained XGBoost model.
+    last_12_series: Pandas Series of the most recent 12 months of 'Sales' indexed by Month.
+    Returns DataFrame with ['Month','XGB_Forecast'].
+    """
+    if model is None or last_12_series is None:
         return None
 
+    try:
+        # We'll iterate one month at a time:
+        history = last_12_series.copy().to_dict()  # {Timestamp -> value}
+        future_months = pd.date_range(
+            start=last_12_series.index.max() + pd.offsets.MonthBegin(1), periods=n_periods, freq="MS"
+        )
+        forecasts = []
+        for dt in future_months:
+            # Build the feature vector for this dt
+            lag_1 = history[dt - pd.offsets.MonthBegin(1)]
+            lag_12 = history.get(dt - pd.DateOffset(months=12), np.nan)
+            # Compute rolling_mean_3 over the last 3 months
+            last1 = history[dt - pd.offsets.MonthBegin(1)]
+            last2 = history.get(dt - pd.offsets.MonthBegin(2), np.nan)
+            last3 = history.get(dt - pd.offsets.MonthBegin(3), np.nan)
+            rm3 = np.nanmean([last1, last2, last3])
+
+            month = dt.month
+            month_sin = np.sin(2 * np.pi * month / 12)
+            month_cos = np.cos(2 * np.pi * month / 12)
+
+            x_vec = np.array([[lag_1, lag_12, rm3, month_sin, month_cos]])
+            pred = max(model.predict(x_vec)[0], 0)
+            forecasts.append(pred)
+
+            # Add to history to enable the next-step lag calculations
+            history[dt] = pred
+
+        return pd.DataFrame({"Month": future_months, "XGB_Forecast": forecasts})
+    except Exception as e:
+        st.error(f"XGBoost forecasting failed: {str(e)}")
+        return None
+
+
 def calculate_accuracy_metrics(actual, forecast):
-    """Calculate MAPE, MAE, and RMSE for actual vs forecast."""
-    if len(actual) == 0 or len(forecast) == 0:
+    """
+    Given two aligned pandas Series (actual, forecast), compute MAPE, MAE, RMSE.
+    """
+    mask = (~actual.isna()) & (~forecast.isna()) & (actual != 0)
+    a = actual[mask]
+    f = forecast[mask]
+    if len(a) == 0:
         return None
-    
-    # Remove NaN values
-    mask = ~(pd.isna(actual) | pd.isna(forecast))
-    actual = actual[mask]
-    forecast = forecast[mask]
-    
-    if len(actual) == 0:
-        return None
-    
-    # Calculate metrics
-    mape = np.mean(np.abs((actual - forecast) / actual)) * 100
-    mae = np.mean(np.abs(actual - forecast))
-    rmse = np.sqrt(np.mean((actual - forecast) ** 2))
-    
-    return {'MAPE': mape, 'MAE': mae, 'RMSE': rmse}
+
+    mape = np.mean(np.abs((a - f) / a)) * 100
+    mae = mean_absolute_error(a, f)
+    rmse = np.sqrt(mean_squared_error(a, f))
+    return {"MAPE": mape, "MAE": mae, "RMSE": rmse}
+
 
 # ----------------------------
 # Streamlit App Layout
 # ----------------------------
 
-st.set_page_config(page_title="Spare‐Parts Sales Forecast 2024", layout="wide")
-st.title("📈 Spare‐Parts Sales Forecast vs. Actual (2024)")
+st.set_page_config(page_title="Spare-Parts Sales Forecast Comparison", layout="wide")
+st.title("📊 Spare-Parts Sales: 2024 Forecast vs. Actual")
 
 st.markdown(
     """
-    **Instructions:**
-    1. Upload your Excel file with columns 'Month' and 'Sales' (and any other part columns).
-    2. The app will aggregate to total monthly sales, train SARIMA and Prophet on data through 2023,
-       then forecast Jan–Dec 2024.
-    3. You'll see a table comparing forecasts to actual 2024 sales (if present), plus accuracy metrics.
-    """
+Upload one file containing historical data (at least through Dec 2023), and optionally a second file
+with the actual 2024 data. Then select which models to run:\n
+- **SARIMA** (Seasonal AutoRegressive Integrated Moving Average)  
+- **Prophet** (Facebook/Meta's forecasting tool)  
+- **ETS** (Exponential Smoothing / Holt–Winters)  
+- **XGBoost** (Gradient Boosting with lag features)  
+
+The app will train each selected model on your historical data, forecast for 2024, 
+then merge all forecasts alongside the 2024 actuals (if provided) for comparison.
+"""
 )
 
-# Sidebar for parameters
-st.sidebar.header("Model Parameters")
-seasonal_period = st.sidebar.selectbox("Seasonal Period", [12, 4, 6], index=0, 
-                                       help="12 for monthly, 4 for quarterly, 6 for bi-monthly")
+# Sidebar: model selection
+st.sidebar.header("🎯 Model Selection")
+run_sarima = st.sidebar.checkbox("SARIMA", value=True, help="Seasonal ARIMA model")
+run_prophet = st.sidebar.checkbox("Prophet", value=True, help="Facebook's forecasting tool")
+run_ets = st.sidebar.checkbox("ETS (Holt-Winters)", value=False, help="Exponential smoothing")
+run_xgb = st.sidebar.checkbox("XGBoost", value=False, help="Tree-based ML model")
+
+# Sidebar: seasonal period (usually 12 for monthly data)
+seasonal_period = st.sidebar.selectbox(
+    "Seasonal Period (months)", [12, 6, 4], index=0, help="12 = yearly seasonality"
+)
 forecast_year = st.sidebar.selectbox("Forecast Year", [2024, 2025], index=0)
 
-uploaded_file = st.file_uploader(
-    "Upload Excel file with historical data (columns 'Month' and 'Sales')",
+# File uploaders
+st.subheader("1. Upload Historical Data")
+historical_file = st.file_uploader(
+    "Excel file with columns ['Month','Sales'] (multiple rows per month will be aggregated)",
     type=["xlsx", "xls"],
-    key="historical_file"
+    key="hist",
 )
 
-# Add separate uploader for 2024 actual data
 st.markdown("---")
-st.subheader("📊 Optional: Upload 2024 Actual Data")
-st.write("If you have actual 2024 sales data, upload it here for comparison with forecasts.")
-
+st.subheader("2. (Optional) Upload 2024 Actuals for Comparison")
 actual_2024_file = st.file_uploader(
-    "Upload Excel file with 2024 actual data (same format: 'Month' and 'Sales')",
+    f"Excel file with 2024 actuals (same format). Will merge on 'Month' for {forecast_year}.",
     type=["xlsx", "xls"],
-    key="actual_2024_file",
-    help="This file should contain your actual 2024 sales data in the same format as your historical data."
+    key="act2024",
 )
 
-if uploaded_file:
-    # Load and aggregate historical data
-    monthly_df = load_data(uploaded_file)
+if historical_file:
+    hist_df = load_data(historical_file)
+    if hist_df is None or hist_df.empty:
+        st.stop()
+
+    st.success(
+        f"Historical data loaded: {hist_df['Month'].min().strftime('%Y-%m')} to "
+        f"{hist_df['Month'].max().strftime('%Y-%m')} ({len(hist_df)} months)."
+    )
+
+    # Load 2024 actuals if provided
+    actual_2024_df = None
+    if actual_2024_file:
+        actual_2024_df = load_actual_2024_data(actual_2024_file, forecast_year)
+        if actual_2024_df is not None:
+            st.success(
+                f"2024 actuals loaded: {actual_2024_df['Month'].min().strftime('%Y-%m')} to "
+                f"{actual_2024_df['Month'].max().strftime('%Y-%m')} ({len(actual_2024_df)} months)."
+            )
+
+    # Split into train (<= Dec of year_before forecast_year) and actual_2024 (≥ Jan forecast_year)
+    cutoff = pd.Timestamp(f"{forecast_year-1}-12-01")
+    if hist_df["Month"].max() < cutoff:
+        st.error(f"Need data through at least {cutoff.strftime('%Y-%m')}. Please upload more data.")
+        st.stop()
+
+    train_df = hist_df[hist_df["Month"] <= cutoff].copy()
+    future_actuals = hist_df[
+        (hist_df["Month"] >= pd.Timestamp(f"{forecast_year}-01-01"))
+        & (hist_df["Month"] < pd.Timestamp(f"{forecast_year+1}-01-01"))
+    ].copy()
+    if not future_actuals.empty:
+        future_actuals = future_actuals.rename(columns={"Sales": f"Actual_{forecast_year}"})
+
+    # Show a preview of train data
+    with st.expander("📋 Historical Data Preview"):
+        st.dataframe(train_df.head(10))
+        st.write(f"Training range: {train_df['Month'].min().strftime('%Y-%m')} to {train_df['Month'].max().strftime('%Y-%m')}")
+        st.write(f"Total training months: {len(train_df)}")
+
+    # Check if any models are selected
+    if not any([run_sarima, run_prophet, run_ets, run_xgb]):
+        st.warning("⚠️ Please select at least one model from the sidebar to run forecasts.")
+        st.stop()
+
+    # Prepare containers for forecasts
+    sarima_forecast_df = None
+    prophet_forecast_df = None
+    ets_forecast_df = None
+    xgb_forecast_df = None
+
+    last_train_date = train_df["Month"].max()
+    n_periods = 12  # always forecasting 12 months ahead
+
+    st.subheader("🚀 Running Forecasts")
     
-    if monthly_df is not None:
-        st.success(f"Historical data loaded successfully: {len(monthly_df)} months of data")
-        
-        # Load 2024 actual data if provided
-        actual_2024_monthly = None
-        if actual_2024_file is not None:
-            actual_2024_monthly = load_actual_2024_data(actual_2024_file, forecast_year)
-            if actual_2024_monthly is not None:
-                st.success(f"2024 actual data loaded successfully: {len(actual_2024_monthly)} months of data")
-                st.write(f"2024 actual data range: {actual_2024_monthly['Month'].min().strftime('%Y-%m')} to {actual_2024_monthly['Month'].max().strftime('%Y-%m')}")
-                st.write(f"Total 2024 actual sales: {actual_2024_monthly['Sales'].sum():,.2f}")
-        
-        # Show data preview
-        with st.expander("Data Preview"):
-            st.write("**Historical Data:**")
-            st.dataframe(monthly_df.head(10))
-            st.write(f"Historical date range: {monthly_df['Month'].min().strftime('%Y-%m')} to {monthly_df['Month'].max().strftime('%Y-%m')}")
-            st.write(f"Total months of historical data: {len(monthly_df)}")
-            
-            if actual_2024_monthly is not None:
-                st.write("**2024 Actual Data:**")
-                st.dataframe(actual_2024_monthly)
-        
-        # Dynamic date splitting based on forecast year
-        train_cutoff = pd.Timestamp(f"{forecast_year-1}-12-01")
-        forecast_start = pd.Timestamp(f"{forecast_year}-01-01")
-        forecast_end = pd.Timestamp(f"{forecast_year+1}-01-01")
-        
-        # Dynamic date splitting based on forecast year
-        train_cutoff = pd.Timestamp(f"{forecast_year-1}-12-01")
-        forecast_start = pd.Timestamp(f"{forecast_year}-01-01")
-        forecast_end = pd.Timestamp(f"{forecast_year+1}-01-01")
-        
-        # Ensure we have enough training data
-        if monthly_df['Month'].max() < train_cutoff:
-            st.error(f"Your data must include at least through December {forecast_year-1} for training. Latest data: {monthly_df['Month'].max().strftime('%Y-%m')}")
-        else:
-            # Split data
-            train_df = monthly_df[monthly_df['Month'] <= train_cutoff].copy()
-            actual_forecast_df = monthly_df[
-                (monthly_df['Month'] >= forecast_start) &
-                (monthly_df['Month'] < forecast_end)
-            ].copy()
-            
-            if len(train_df) < seasonal_period * 2:
-                st.error(f"Need at least {seasonal_period * 2} months of training data. Found: {len(train_df)}")
+    # Progress tracking
+    models_to_run = sum([run_sarima, run_prophet, run_ets, run_xgb])
+    progress_bar = st.progress(0)
+    model_count = 0
+
+    # 1) SARIMA
+    if run_sarima:
+        with st.spinner("Training SARIMA model..."):
+            sarima_model = train_sarima(train_df.set_index("Month")["Sales"], seasonal_period)
+            if sarima_model:
+                sarima_forecast_df = forecast_sarima(sarima_model, n_periods, last_train_date)
+                st.success("✅ SARIMA forecast ready.")
             else:
-                actual_forecast_df = actual_forecast_df.rename(columns={'Sales': f'Actual_{forecast_year}'})
-                
-                col1, col2 = st.columns(2)
-                
-                # Train models
-                with col1:
-                    st.subheader("SARIMA Model")
-                    train_series = train_df.set_index('Month')['Sales']
-                    
-                    with st.spinner("Training SARIMA..."):
-                        sarima_model = train_sarima(train_series, seasonal_period)
-                    
-                    if sarima_model:
-                        st.success("SARIMA training completed")
-                        st.write("Model: SARIMA(1,1,1)(1,1,1)[12]")
-                        sarima_forecast_df = forecast_sarima(sarima_model, n_periods=12, last_date=train_df['Month'].max())
-                    else:
-                        sarima_forecast_df = None
-                
-                with col2:
-                    st.subheader("Prophet Model")
-                    prophet_train = train_df.rename(columns={'Month': 'ds', 'Sales': 'y'})[['ds', 'y']]
-                    
-                    prophet_model = train_prophet(prophet_train)
-                    
-                    if prophet_model:
-                        st.success("Prophet training completed")
-                        prophet_forecast_df = forecast_prophet(prophet_model, periods=12, last_date=train_df['Month'].max())
-                    else:
-                        prophet_forecast_df = None
-                
-                # Combine results
-                if sarima_forecast_df is not None and prophet_forecast_df is not None:
-                    # Merge forecasts
-                    forecasts_df = pd.merge(sarima_forecast_df, prophet_forecast_df, on='Month', how='inner')
-                    
-                    # Simple ensemble = average of SARIMA and Prophet
-                    forecasts_df['Ensemble_Forecast'] = (
-                        forecasts_df['SARIMA_Forecast'] + forecasts_df['Prophet_Forecast']
-                    ) / 2
-                    
-                    # Create a complete date range for the forecast year
-                    complete_dates = pd.date_range(
-                        start=forecast_start, 
-                        end=pd.Timestamp(f"{forecast_year}-12-01"), 
-                        freq='MS'
-                    )
-                    complete_df = pd.DataFrame({'Month': complete_dates})
-                    
-                    # Merge forecasts with complete date range
-                    result_df = pd.merge(complete_df, forecasts_df, on='Month', how='left')
-                    
-                    # Merge with actual data - this ensures all actual data is included
-                    if len(actual_forecast_df) > 0:
-                        st.write(f"**Merging {forecast_year} actual data:** {len(actual_forecast_df)} months")
-                        
-                        result_df = pd.merge(result_df, actual_forecast_df[['Month', f'Actual_{forecast_year}']], 
-                                           on='Month', how='left')
-                        
-                        # Verify merge worked
-                        actual_count = result_df[f'Actual_{forecast_year}'].notna().sum()
-                        actual_total = result_df[f'Actual_{forecast_year}'].sum()
-                        st.success(f"✅ Successfully merged: {actual_count} months have actual data (Total: {actual_total:,.0f})")
-                    else:
-                        # Add empty actual column if no actual data
-                        result_df[f'Actual_{forecast_year}'] = np.nan
-                        st.info("📈 No actual data to merge - this is prospective forecasting")
-                    
-                    # Round numeric columns for display
-                    numeric_cols = result_df.select_dtypes(include=[np.number]).columns
-                    result_df[numeric_cols] = result_df[numeric_cols].round(2)
-                    
-                    # Display results
-                    st.subheader(f"Forecast vs. Actual ({forecast_year})")
-                    st.dataframe(result_df.set_index('Month'))
-                    
-                    # Calculate accuracy metrics if we have actuals
-                    if f'Actual_{forecast_year}' in result_df.columns and not result_df[f'Actual_{forecast_year}'].isna().all():
-                        st.subheader("Accuracy Metrics")
-                        col1, col2, col3 = st.columns(3)
-                        
-                        actual_col = result_df[f'Actual_{forecast_year}'].dropna()
-                        ensemble_col = result_df.loc[actual_col.index, 'Ensemble_Forecast']
-                        
-                        metrics = calculate_accuracy_metrics(actual_col, ensemble_col)
-                        if metrics:
-                            col1.metric("MAPE", f"{metrics['MAPE']:.1f}%")
-                            col2.metric("MAE", f"{metrics['MAE']:.0f}")
-                            col3.metric("RMSE", f"{metrics['RMSE']:.0f}")
-                    
-                    # Plotting
-                    st.subheader("Visual Comparison")
-                    plot_cols = [f'Actual_{forecast_year}', 'SARIMA_Forecast', 'Prophet_Forecast', 'Ensemble_Forecast']
-                    plot_df = result_df.set_index('Month')[plot_cols]
-                    st.line_chart(plot_df)
-                    
-                    # Provide download
-                    csv = result_df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label=f"Download Forecast vs Actual (CSV)",
-                        data=csv,
-                        file_name=f"forecast_vs_actual_{forecast_year}.csv",
-                        mime="text/csv"
-                    )
-                
-                elif sarima_forecast_df is not None:
-                    st.warning("Only SARIMA model succeeded. Showing SARIMA results only.")
-                    # Create result with just SARIMA and actual data
-                    complete_dates = pd.date_range(start=forecast_start, end=pd.Timestamp(f"{forecast_year}-12-01"), freq='MS')
-                    result_df = pd.DataFrame({'Month': complete_dates})
-                    result_df = pd.merge(result_df, sarima_forecast_df, on='Month', how='left')
-                    
-                    if len(actual_forecast_df) > 0:
-                        result_df = pd.merge(result_df, actual_forecast_df[['Month', f'Actual_{forecast_year}']], on='Month', how='left')
-                    else:
-                        result_df[f'Actual_{forecast_year}'] = np.nan
-                    
-                    # Display results
-                    st.dataframe(result_df.set_index('Month'))
-                    
-                elif prophet_forecast_df is not None:
-                    st.warning("Only Prophet model succeeded. Showing Prophet results only.")
-                    # Create result with just Prophet and actual data
-                    complete_dates = pd.date_range(start=forecast_start, end=pd.Timestamp(f"{forecast_year}-12-01"), freq='MS')
-                    result_df = pd.DataFrame({'Month': complete_dates})
-                    result_df = pd.merge(result_df, prophet_forecast_df, on='Month', how='left')
-                    
-                    if len(actual_forecast_df) > 0:
-                        result_df = pd.merge(result_df, actual_forecast_df[['Month', f'Actual_{forecast_year}']], on='Month', how='left')
-                    else:
-                        result_df[f'Actual_{forecast_year}'] = np.nan
-                    
-                    # Display results
-                    st.dataframe(result_df.set_index('Month'))
-                else:
-                    st.error("Both models failed to train. Please check your data quality and try again.")
+                st.error("❌ SARIMA failed.")
+        model_count += 1
+        progress_bar.progress(model_count / models_to_run)
+
+    # 2) Prophet
+    if run_prophet:
+        with st.spinner("Training Prophet model..."):
+            prophet_train = train_df.rename(columns={"Month": "ds", "Sales": "y"})[["ds", "y"]]
+            prophet_model = train_prophet(prophet_train)
+            if prophet_model:
+                prophet_forecast_df = forecast_prophet(prophet_model, n_periods, last_train_date)
+                st.success("✅ Prophet forecast ready.")
+            else:
+                st.error("❌ Prophet failed.")
+        model_count += 1
+        progress_bar.progress(model_count / models_to_run)
+
+    # 3) ETS (Holt-Winters)
+    if run_ets:
+        with st.spinner("Training ETS (Holt-Winters) model..."):
+            ets_model = train_ets(train_df.set_index("Month")["Sales"], seasonal_period)
+            if ets_model:
+                ets_forecast_df = forecast_ets(ets_model, n_periods, last_train_date)
+                st.success("✅ ETS forecast ready.")
+            else:
+                st.error("❌ ETS failed.")
+        model_count += 1
+        progress_bar.progress(model_count / models_to_run)
+
+    # 4) XGBoost (tree-based lag features)
+    if run_xgb:
+        with st.spinner("Training XGBoost model..."):
+            xgb_model, last_12 = train_xgboost(train_df[["Month", "Sales"]])
+            if xgb_model is not None:
+                xgb_forecast_df = forecast_xgboost(xgb_model, last_12, n_periods)
+                st.success("✅ XGBoost forecast ready.")
+            else:
+                st.error("❌ XGBoost failed.")
+        model_count += 1
+        progress_bar.progress(model_count / models_to_run)
+
+    # 5) Merge all forecasts into one DataFrame
+    # Create a complete 12‐month index for forecast_year
+    future_months = pd.date_range(
+        start=pd.Timestamp(f"{forecast_year}-01-01"), periods=12, freq="MS"
+    )
+    result_df = pd.DataFrame({"Month": future_months})
+
+    # Merge each forecast if available
+    if sarima_forecast_df is not None:
+        result_df = result_df.merge(
+            sarima_forecast_df[["Month", "SARIMA_Forecast"]], on="Month", how="left"
+        )
+    if prophet_forecast_df is not None:
+        result_df = result_df.merge(
+            prophet_forecast_df[["Month", "Prophet_Forecast"]], on="Month", how="left"
+        )
+    if ets_forecast_df is not None:
+        result_df = result_df.merge(
+            ets_forecast_df[["Month", "ETS_Forecast"]], on="Month", how="left"
+        )
+    if xgb_forecast_df is not None:
+        result_df = result_df.merge(
+            xgb_forecast_df[["Month", "XGB_Forecast"]], on="Month", how="left"
+        )
+
+    # If user uploaded "actual_2024_df", merge it:
+    if actual_2024_df is not None:
+        result_df = result_df.merge(actual_2024_df[["Month", f"Actual_{forecast_year}"]], on="Month", how="left")
+    else:
+        # If they did not upload a separate actuals file, but historical data already contains some 2024 months:
+        if not future_actuals.empty:
+            result_df = result_df.merge(
+                future_actuals[["Month", f"Actual_{forecast_year}"]], on="Month", how="left"
+            )
+        else:
+            result_df[f"Actual_{forecast_year}"] = np.nan
+
+    # 6) Simple Ensemble = average of all selected model forecasts (ignoring NaNs)
+    model_cols = []
+    if run_sarima and sarima_forecast_df is not None:
+        model_cols.append("SARIMA_Forecast")
+    if run_prophet and prophet_forecast_df is not None:
+        model_cols.append("Prophet_Forecast")
+    if run_ets and ets_forecast_df is not None:
+        model_cols.append("ETS_Forecast")
+    if run_xgb and xgb_forecast_df is not None:
+        model_cols.append("XGB_Forecast")
+
+    if model_cols:
+        result_df["Ensemble_Forecast"] = result_df[model_cols].mean(axis=1)
+
+    # Round all numeric columns to two decimals
+    for c in result_df.select_dtypes(include="number").columns:
+        result_df[c] = result_df[c].round(2)
+
+    # 7) Display the merged table
+    st.subheader(f"📊 Forecast vs. Actual ({forecast_year})")
+    
+    # Show data availability summary
+    if f"Actual_{forecast_year}" in result_df.columns and not result_df[f"Actual_{forecast_year}"].isna().all():
+        available_months = result_df[f"Actual_{forecast_year}"].notna().sum()
+        total_actual = result_df[f"Actual_{forecast_year}"].sum()
+        st.info(f"📈 Found actual data for {available_months} out of 12 months. Total actual sales: {total_actual:,.0f}")
+    else:
+        st.info("📊 No actual data provided - showing forecasts only")
+        if model_cols:
+            total_ensemble = result_df["Ensemble_Forecast"].sum()
+            st.write(f"🎯 **Total ensemble forecast for {forecast_year}: {total_ensemble:,.0f}**")
+    
+    st.dataframe(result_df.set_index("Month"), use_container_width=True)
+
+    # 8) Calculate and display accuracy metrics if actuals exist
+    if f"Actual_{forecast_year}" in result_df.columns and not result_df[f"Actual_{forecast_year}"].isna().all():
+        st.subheader("📐 Accuracy Metrics")
+        st.write("*Calculated only for months with actual data*")
+
+        metrics = {}
+        for col in model_cols + (["Ensemble_Forecast"] if model_cols else []):
+            m = calculate_accuracy_metrics(
+                result_df[f"Actual_{forecast_year}"], result_df[col]
+            )
+            if m is not None:
+                metrics[col] = m
+
+        if metrics:
+            # Build a DataFrame for display
+            metrics_df = (
+                pd.DataFrame(metrics)
+                .T.reset_index()
+                .rename(columns={"index": "Model"})
+                .loc[:, ["Model", "MAPE", "MAE", "RMSE"]]
+            )
+            
+            # Find best model for each metric
+            best_mape = metrics_df.loc[metrics_df["MAPE"].idxmin(), "Model"]
+            best_mae = metrics_df.loc[metrics_df["MAE"].idxmin(), "Model"]
+            best_rmse = metrics_df.loc[metrics_df["RMSE"].idxmin(), "Model"]
+            
+            st.dataframe(
+                metrics_df.style.format({"MAPE": "{:.1f}%", "MAE": "{:.0f}", "RMSE": "{:.0f}"}),
+                use_container_width=True
+            )
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Best MAPE", best_mape, f"{metrics[best_mape]['MAPE']:.1f}%")
+            col2.metric("Best MAE", best_mae, f"{metrics[best_mae]['MAE']:.0f}")
+            col3.metric("Best RMSE", best_rmse, f"{metrics[best_rmse]['RMSE']:.0f}")
+        else:
+            st.info("No overlapping months of actuals and forecasts to compute metrics.")
+    else:
+        # Show forecast summaries instead
+        st.subheader("📈 Forecast Summary")
+        if model_cols:
+            summary_data = []
+            for col in model_cols + ["Ensemble_Forecast"]:
+                total = result_df[col].sum()
+                avg = result_df[col].mean()
+                summary_data.append({
+                    "Model": col.replace("_Forecast", ""),
+                    "Total Forecast": f"{total:,.0f}",
+                    "Monthly Average": f"{avg:,.0f}"
+                })
+            
+            summary_df = pd.DataFrame(summary_data)
+            st.dataframe(summary_df, use_container_width=True)
+
+    # 9)
