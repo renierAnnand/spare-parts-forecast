@@ -325,9 +325,24 @@ if uploaded_file:
                         forecasts_df['SARIMA_Forecast'] + forecasts_df['Prophet_Forecast']
                     ) / 2
                     
-                    # Merge with actuals
-                    result_df = pd.merge(forecasts_df, actual_forecast_df[['Month', f'Actual_{forecast_year}']], 
-                                       on='Month', how='left')
+                    # Create a complete date range for the forecast year
+                    complete_dates = pd.date_range(
+                        start=forecast_start, 
+                        end=pd.Timestamp(f"{forecast_year}-12-01"), 
+                        freq='MS'
+                    )
+                    complete_df = pd.DataFrame({'Month': complete_dates})
+                    
+                    # Merge forecasts with complete date range
+                    result_df = pd.merge(complete_df, forecasts_df, on='Month', how='left')
+                    
+                    # Merge with actual data - this ensures all actual data is included
+                    if len(actual_forecast_df) > 0:
+                        result_df = pd.merge(result_df, actual_forecast_df[['Month', f'Actual_{forecast_year}']], 
+                                           on='Month', how='left')
+                    else:
+                        # Add empty actual column if no actual data
+                        result_df[f'Actual_{forecast_year}'] = np.nan
                     
                     # Round numeric columns for display
                     numeric_cols = result_df.select_dtypes(include=[np.number]).columns
@@ -368,9 +383,32 @@ if uploaded_file:
                 
                 elif sarima_forecast_df is not None:
                     st.warning("Only SARIMA model succeeded. Showing SARIMA results only.")
-                    # Handle SARIMA-only case
+                    # Create result with just SARIMA and actual data
+                    complete_dates = pd.date_range(start=forecast_start, end=pd.Timestamp(f"{forecast_year}-12-01"), freq='MS')
+                    result_df = pd.DataFrame({'Month': complete_dates})
+                    result_df = pd.merge(result_df, sarima_forecast_df, on='Month', how='left')
+                    
+                    if len(actual_forecast_df) > 0:
+                        result_df = pd.merge(result_df, actual_forecast_df[['Month', f'Actual_{forecast_year}']], on='Month', how='left')
+                    else:
+                        result_df[f'Actual_{forecast_year}'] = np.nan
+                    
+                    # Display results
+                    st.dataframe(result_df.set_index('Month'))
+                    
                 elif prophet_forecast_df is not None:
                     st.warning("Only Prophet model succeeded. Showing Prophet results only.")
-                    # Handle Prophet-only case
+                    # Create result with just Prophet and actual data
+                    complete_dates = pd.date_range(start=forecast_start, end=pd.Timestamp(f"{forecast_year}-12-01"), freq='MS')
+                    result_df = pd.DataFrame({'Month': complete_dates})
+                    result_df = pd.merge(result_df, prophet_forecast_df, on='Month', how='left')
+                    
+                    if len(actual_forecast_df) > 0:
+                        result_df = pd.merge(result_df, actual_forecast_df[['Month', f'Actual_{forecast_year}']], on='Month', how='left')
+                    else:
+                        result_df[f'Actual_{forecast_year}'] = np.nan
+                    
+                    # Display results
+                    st.dataframe(result_df.set_index('Month'))
                 else:
                     st.error("Both models failed to train. Please check your data quality and try again.")
