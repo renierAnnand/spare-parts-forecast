@@ -19,9 +19,13 @@ from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import OneHotEncoder
+from sklearn.linear_model import LinearRegression
 
 import warnings
 warnings.filterwarnings("ignore")
+
+# Configure streamlit
+st.set_page_config(page_title="Sales Forecasting Dashboard", layout="wide")
 
 # ----------------------------
 # Helper functions
