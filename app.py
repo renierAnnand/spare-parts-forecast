@@ -1,14 +1,12 @@
-"""
-Streamlit app for forecasting spare‐parts sales (monthly) in 2024 and comparing
-multiple models against actuals. Supports SARIMA, Prophet, ETS, and XGBoost,
-plus a simple ensemble of all selected forecasts.
-"""
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import logging
 from datetime import datetime
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+import io
 
 # Forecasting libraries
 from prophet import Prophet
@@ -423,6 +421,221 @@ def forecast_xgboost(model, last_12_series, n_periods):
     except Exception as e:
         st.error(f"XGBoost forecasting failed: {str(e)}")
         return None
+
+
+def create_excel_report(result_df, hist_df, actual_2024_df, forecast_year):
+    """
+    Create a comprehensive Excel report with multiple sheets.
+    """
+    output = io.BytesIO()
+    
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # Sheet 1: Main Results
+        result_df.to_excel(writer, sheet_name='Forecast_vs_Actual', index=False)
+        
+        # Sheet 2: Historical Data
+        if hist_df is not None:
+            hist_summary = hist_df.groupby(hist_df['Month'].dt.year)['Sales'].agg([
+                'sum', 'mean', 'min', 'max', 'count'
+            ]).reset_index()
+            hist_summary.columns = ['Year', 'Total_Sales', 'Avg_Monthly', 'Min_Monthly', 'Max_Monthly', 'Months_Count']
+            hist_summary.to_excel(writer, sheet_name='Historical_Summary', index=False)
+            
+            # Monthly historical data
+            hist_df.to_excel(writer, sheet_name='Historical_Data', index=False)
+        
+        # Sheet 3: Actual 2024 Data (if available)
+        if actual_2024_df is not None:
+            actual_2024_df.to_excel(writer, sheet_name='Actual_2024_Data', index=False)
+        
+        # Sheet 4: Model Performance Summary
+        if f'Actual_{forecast_year}' in result_df.columns and not result_df[f'Actual_{forecast_year}'].isna().all():
+            performance_data = []
+            model_cols = [col for col in result_df.columns if '_Forecast' in col]
+            
+            for col in model_cols:
+                metrics = calculate_accuracy_metrics(result_df[f'Actual_{forecast_year}'], result_df[col])
+                if metrics:
+                    performance_data.append({
+                        'Model': col.replace('_Forecast', ''),
+                        'MAPE': round(metrics['MAPE'], 2),
+                        'MAE': round(metrics['MAE'], 0),
+                        'RMSE': round(metrics['RMSE'], 0),
+                        'Total_Forecast': result_df[col].sum(),
+                        'Total_Actual': result_df[f'Actual_{forecast_year}'].sum()
+                    })
+            
+            if performance_data:
+                performance_df = pd.DataFrame(performance_data)
+                performance_df.to_excel(writer, sheet_name='Model_Performance', index=False)
+        
+        # Sheet 5: Monthly Analysis
+        monthly_analysis = result_df.copy()
+        monthly_analysis['Month_Name'] = pd.to_datetime(monthly_analysis['Month']).dt.strftime('%B')
+        monthly_analysis['Quarter'] = pd.to_datetime(monthly_analysis['Month']).dt.quarter
+        monthly_analysis.to_excel(writer, sheet_name='Monthly_Analysis', index=False)
+    
+    output.seek(0)
+    return output
+
+
+def create_dashboard_charts(result_df, hist_df, forecast_year):
+    """
+    Create interactive dashboard charts using Plotly.
+    """
+    # Main forecast vs actual chart
+    fig_main = go.Figure()
+    
+    # Add actual data if available
+    if f'Actual_{forecast_year}' in result_df.columns and not result_df[f'Actual_{forecast_year}'].isna().all():
+        fig_main.add_trace(go.Scatter(
+            x=result_df['Month'],
+            y=result_df[f'Actual_{forecast_year}'],
+            mode='lines+markers',
+            name=f'Actual {forecast_year}',
+            line=dict(color='#2E86AB', width=3),
+            marker=dict(size=8)
+        ))
+    
+    # Add forecast lines
+    forecast_cols = [col for col in result_df.columns if '_Forecast' in col]
+    colors = ['#A23B72', '#F18F01', '#C73E1D', '#7209B7']
+    
+    for i, col in enumerate(forecast_cols):
+        fig_main.add_trace(go.Scatter(
+            x=result_df['Month'],
+            y=result_df[col],
+            mode='lines+markers',
+            name=col.replace('_Forecast', ''),
+            line=dict(color=colors[i % len(colors)], width=2),
+            marker=dict(size=6)
+        ))
+    
+    fig_main.update_layout(
+        title=f'📈 Sales Forecast vs Actual ({forecast_year})',
+        xaxis_title='Month',
+        yaxis_title='Sales Volume',
+        hovermode='x unified',
+        height=500,
+        showlegend=True
+    )
+    
+    return fig_main
+
+
+def create_performance_chart(result_df, forecast_year):
+    """
+    Create model performance comparison chart.
+    """
+    if f'Actual_{forecast_year}' not in result_df.columns or result_df[f'Actual_{forecast_year}'].isna().all():
+        return None
+    
+    performance_data = []
+    model_cols = [col for col in result_df.columns if '_Forecast' in col]
+    
+    for col in model_cols:
+        metrics = calculate_accuracy_metrics(result_df[f'Actual_{forecast_year}'], result_df[col])
+        if metrics:
+            performance_data.append({
+                'Model': col.replace('_Forecast', ''),
+                'MAPE': metrics['MAPE'],
+                'MAE': metrics['MAE'],
+                'RMSE': metrics['RMSE']
+            })
+    
+    if not performance_data:
+        return None
+    
+    perf_df = pd.DataFrame(performance_data)
+    
+    # Create subplots for different metrics
+    fig = make_subplots(
+        rows=1, cols=3,
+        subplot_titles=('MAPE (%)', 'MAE', 'RMSE'),
+        specs=[[{"secondary_y": False}, {"secondary_y": False}, {"secondary_y": False}]]
+    )
+    
+    colors = ['#2E86AB', '#A23B72', '#F18F01', '#C73E1D']
+    
+    # MAPE
+    fig.add_trace(go.Bar(
+        x=perf_df['Model'],
+        y=perf_df['MAPE'],
+        name='MAPE',
+        marker_color=colors[0],
+        showlegend=False
+    ), row=1, col=1)
+    
+    # MAE
+    fig.add_trace(go.Bar(
+        x=perf_df['Model'],
+        y=perf_df['MAE'],
+        name='MAE',
+        marker_color=colors[1],
+        showlegend=False
+    ), row=1, col=2)
+    
+    # RMSE
+    fig.add_trace(go.Bar(
+        x=perf_df['Model'],
+        y=perf_df['RMSE'],
+        name='RMSE',
+        marker_color=colors[2],
+        showlegend=False
+    ), row=1, col=3)
+    
+    fig.update_layout(
+        title_text="📊 Model Performance Comparison",
+        height=400,
+        showlegend=False
+    )
+    
+    return fig
+
+
+def create_historical_trend_chart(hist_df):
+    """
+    Create historical sales trend chart.
+    """
+    if hist_df is None or len(hist_df) == 0:
+        return None
+    
+    # Monthly trend
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatter(
+        x=hist_df['Month'],
+        y=hist_df['Sales'],
+        mode='lines+markers',
+        name='Historical Sales',
+        line=dict(color='#2E86AB', width=2),
+        marker=dict(size=5)
+    ))
+    
+    # Add trend line
+    from sklearn.linear_model import LinearRegression
+    X = np.arange(len(hist_df)).reshape(-1, 1)
+    y = hist_df['Sales'].values
+    lr = LinearRegression().fit(X, y)
+    trend = lr.predict(X)
+    
+    fig.add_trace(go.Scatter(
+        x=hist_df['Month'],
+        y=trend,
+        mode='lines',
+        name='Trend Line',
+        line=dict(color='#A23B72', width=2, dash='dash')
+    ))
+    
+    fig.update_layout(
+        title='📈 Historical Sales Trend',
+        xaxis_title='Month',
+        yaxis_title='Sales Volume',
+        height=400,
+        hovermode='x unified'
+    )
+    
+    return fig
 
 
 def calculate_accuracy_metrics(actual, forecast):
