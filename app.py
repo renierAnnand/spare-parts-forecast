@@ -408,10 +408,12 @@ def main():
 
     # Create forecast dates
     last_date = hist_df['Month'].max()
+    
+    # Generate forecast dates for the selected forecast year
     forecast_dates = pd.date_range(
-        start=last_date + pd.DateOffset(months=1),
-        periods=12,
-        freq='M'
+        start=f"{forecast_year}-01-01",
+        end=f"{forecast_year}-12-01",
+        freq='MS'  # Month start
     )
 
     # Run each selected model
@@ -448,12 +450,33 @@ def main():
         **forecast_results
     })
 
-    # Load and merge actual 2024 data if provided
+    # Load and merge actual data if provided
     actual_2024_df = None
     if actual_2024_file is not None:
         actual_2024_df = load_actual_2024_data(actual_2024_file, forecast_year)
         if actual_2024_df is not None:
+            st.success(f"✅ Loaded {len(actual_2024_df)} months of actual data")
+            
+            # Ensure proper date alignment
+            actual_2024_df['Month'] = pd.to_datetime(actual_2024_df['Month'])
+            result_df['Month'] = pd.to_datetime(result_df['Month'])
+            
+            # Merge actual data with forecasts
             result_df = result_df.merge(actual_2024_df, on="Month", how="left")
+            
+            # Show merge results
+            actual_count = result_df[f'Actual_{forecast_year}'].notna().sum()
+            st.info(f"📊 Successfully merged actual data: {actual_count} out of 12 months have actual values")
+            
+            # Debug: Show actual data summary
+            if actual_count > 0:
+                actual_total = result_df[f'Actual_{forecast_year}'].sum()
+                st.success(f"📈 Total actual sales for {forecast_year}: {actual_total:,.0f}")
+            else:
+                st.warning("⚠️ No actual data matched the forecast months. Check date formats.")
+                # Show what actual dates we have
+                st.write("Actual data dates found:", actual_2024_df['Month'].dt.strftime('%Y-%m').tolist())
+                st.write("Forecast dates expected:", result_df['Month'].dt.strftime('%Y-%m').tolist())
 
     # Display results
     st.subheader("📊 Forecast Results")
@@ -500,11 +523,19 @@ def main():
     # Create the comparison chart
     fig = go.Figure()
     
-    # Add actual data line if available
-    if actual_col in result_df.columns and not result_df[actual_col].isna().all():
+    # Check if we have actual data
+    has_actual_data = actual_col in result_df.columns and result_df[actual_col].notna().any()
+    
+    if has_actual_data:
+        # Filter out NaN values for actual data display
+        actual_data = result_df[result_df[actual_col].notna()]
+        
+        st.info(f"📊 Displaying actual data for {len(actual_data)} months")
+        
+        # Add actual data line
         fig.add_trace(go.Scatter(
-            x=result_df['Month'],
-            y=result_df[actual_col],
+            x=actual_data['Month'],
+            y=actual_data[actual_col],
             mode='lines+markers',
             name=f'🎯 ACTUAL {forecast_year}',
             line=dict(color='#FF6B6B', width=4),
@@ -553,27 +584,53 @@ def main():
         
         st.plotly_chart(fig, use_container_width=True)
         
-        # Show accuracy summary table
-        st.subheader("📋 Model Accuracy Summary")
-        accuracy_data = []
-        for col in model_cols:
-            metrics = calculate_accuracy_metrics(result_df[actual_col], result_df[col])
-            if metrics:
-                accuracy_data.append({
-                    'Model': col.replace('_Forecast', ''),
-                    'MAPE (%)': round(metrics['MAPE'], 1),
-                    'MAE': round(metrics['MAE'], 0),
-                    'Total Forecast': f"{result_df[col].sum():,.0f}",
-                    'Total Actual': f"{result_df[actual_col].sum():,.0f}",
-                    'Accuracy': f"{100 - metrics['MAPE']:.1f}%"
-                })
+        # Show detailed comparison metrics
+        st.subheader("📋 Detailed Model Performance")
         
-        if accuracy_data:
-            accuracy_df = pd.DataFrame(accuracy_data)
-            st.dataframe(accuracy_df, use_container_width=True)
+        # Create detailed comparison table
+        comparison_data = []
+        actual_total = actual_data[actual_col].sum()
+        
+        for col in model_cols:
+            model_name = col.replace('_Forecast', '')
+            forecast_total = result_df[col].sum()
+            
+            # Calculate metrics only for months with actual data
+            actual_subset = result_df[result_df[actual_col].notna()]
+            if len(actual_subset) > 0:
+                metrics = calculate_accuracy_metrics(actual_subset[actual_col], actual_subset[col])
+                if metrics:
+                    bias = ((forecast_total - actual_total) / actual_total * 100) if actual_total > 0 else 0
+                    comparison_data.append({
+                        'Model': model_name,
+                        'MAPE (%)': f"{metrics['MAPE']:.1f}%",
+                        'MAE': f"{metrics['MAE']:,.0f}",
+                        'Total Forecast': f"{forecast_total:,.0f}",
+                        'Total Actual': f"{actual_total:,.0f}",
+                        'Bias (%)': f"{bias:+.1f}%",
+                        'Accuracy': f"{100 - metrics['MAPE']:.1f}%"
+                    })
+        
+        if comparison_data:
+            comparison_df = pd.DataFrame(comparison_data)
+            st.dataframe(comparison_df, use_container_width=True)
+            
+            # Show summary statistics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("📊 Total Actual Sales", f"{actual_total:,.0f}")
+            with col2:
+                ensemble_total = result_df['Ensemble_Forecast'].sum() if 'Ensemble_Forecast' in result_df.columns else 0
+                st.metric("🔥 Total Ensemble Forecast", f"{ensemble_total:,.0f}")
+            with col3:
+                if ensemble_total > 0 and actual_total > 0:
+                    ensemble_accuracy = 100 - (abs(ensemble_total - actual_total) / actual_total * 100)
+                    st.metric("🎯 Ensemble Accuracy", f"{ensemble_accuracy:.1f}%")
     
     else:
         # Show forecast-only chart
+        st.warning("📊 No actual data available for comparison. Showing forecasts only.")
+        
         fig = go.Figure()
         colors = ['#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD']
         
@@ -607,7 +664,7 @@ def main():
         )
         
         st.plotly_chart(fig, use_container_width=True)
-        st.info("📊 Upload 2024 actual data to see model accuracy comparison!")
+        st.info(f"📊 Upload {forecast_year} actual data to see model accuracy comparison!")
 
     # 10) ENHANCED EXCEL DOWNLOAD
     st.subheader("📊 Enhanced Excel Report")
@@ -623,10 +680,10 @@ def main():
             main_sheet['Month'] = main_sheet['Month'].dt.strftime('%Y-%m-%d')
             main_sheet.to_excel(writer, sheet_name='Main_Comparison', index=False)
             
-            # Sheet 2: Model vs Actual Analysis
-            if f'Actual_{forecast_year}' in result_df.columns:
+            # Sheet 2: Model vs Actual Analysis (only if actual data exists)
+            actual_col = f'Actual_{forecast_year}'
+            if actual_col in result_df.columns and result_df[actual_col].notna().any():
                 model_cols = [col for col in result_df.columns if '_Forecast' in col]
-                actual_col = f'Actual_{forecast_year}'
                 
                 analysis_data = []
                 for _, row in result_df.iterrows():
@@ -658,32 +715,60 @@ def main():
                 analysis_df = pd.DataFrame(analysis_data)
                 analysis_df.to_excel(writer, sheet_name='Detailed_Analysis', index=False)
                 
-                # Sheet 3: Model Performance Summary
+                # Sheet 3: Model Performance Summary (only if actual data exists)
                 summary_data = []
-                for col in model_cols:
-                    model_name = col.replace('_Forecast', '')
-                    metrics = calculate_accuracy_metrics(result_df[actual_col], result_df[col])
-                    
-                    if metrics:
-                        total_forecast = result_df[col].sum()
-                        total_actual = result_df[actual_col].sum()
-                        bias_pct = ((total_forecast - total_actual) / total_actual * 100) if total_actual > 0 else 0
-                        
-                        summary_data.append({
-                            'Model': model_name,
-                            'MAPE': round(metrics['MAPE'], 2),
-                            'MAE': round(metrics['MAE'], 0),
-                            'RMSE': round(metrics['RMSE'], 0),
-                            'Total_Forecast': round(total_forecast, 0),
-                            'Total_Actual': round(total_actual, 0),
-                            'Bias_Percent': round(bias_pct, 2),
-                            'Accuracy_Percent': round(100 - metrics['MAPE'], 1)
-                        })
+                actual_subset = result_df[result_df[actual_col].notna()]
                 
-                if summary_data:
-                    summary_df = pd.DataFrame(summary_data)
-                    summary_df = summary_df.sort_values('MAPE')  # Best to worst
-                    summary_df.to_excel(writer, sheet_name='Model_Performance', index=False)
+                if len(actual_subset) > 0:
+                    actual_total = actual_subset[actual_col].sum()
+                    
+                    for col in model_cols:
+                        model_name = col.replace('_Forecast', '')
+                        
+                        # Calculate metrics only for months with actual data
+                        metrics = calculate_accuracy_metrics(actual_subset[actual_col], actual_subset[col])
+                        
+                        if metrics:
+                            total_forecast = result_df[col].sum()
+                            bias_pct = ((total_forecast - actual_total) / actual_total * 100) if actual_total > 0 else 0
+                            
+                            summary_data.append({
+                                'Model': model_name,
+                                'MAPE': round(metrics['MAPE'], 2),
+                                'MAE': round(metrics['MAE'], 0),
+                                'RMSE': round(metrics['RMSE'], 0),
+                                'Total_Forecast': round(total_forecast, 0),
+                                'Total_Actual': round(actual_total, 0),
+                                'Bias_Percent': round(bias_pct, 2),
+                                'Accuracy_Percent': round(100 - metrics['MAPE'], 1),
+                                'Months_With_Actual': len(actual_subset)
+                            })
+                    
+                    if summary_data:
+                        summary_df = pd.DataFrame(summary_data)
+                        summary_df = summary_df.sort_values('MAPE')  # Best to worst
+                        summary_df.to_excel(writer, sheet_name='Model_Performance', index=False)
+            
+            # Sheet 4: Forecast Summary (always included)
+            model_cols = [col for col in result_df.columns if '_Forecast' in col]
+            forecast_summary = []
+            
+            for col in model_cols:
+                model_name = col.replace('_Forecast', '')
+                total_forecast = result_df[col].sum()
+                avg_monthly = result_df[col].mean()
+                
+                forecast_summary.append({
+                    'Model': model_name,
+                    'Total_Annual_Forecast': round(total_forecast, 0),
+                    'Average_Monthly_Forecast': round(avg_monthly, 0),
+                    'Min_Monthly': round(result_df[col].min(), 0),
+                    'Max_Monthly': round(result_df[col].max(), 0)
+                })
+            
+            if forecast_summary:
+                forecast_df = pd.DataFrame(forecast_summary)
+                forecast_df.to_excel(writer, sheet_name='Forecast_Summary', index=False)
         
         output.seek(0)
         return output
