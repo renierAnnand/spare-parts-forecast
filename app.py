@@ -2,7 +2,7 @@
 
 """
 Streamlit app for forecasting spare‐parts sales (monthly) and comparing 2024 forecasts
-against actuals. Uses SARIMA (via statsmodels) and Prophet, then creates a simple ensemble.
+against actuals. Uses SARIMA (via pmdarima) and Prophet, then creates a simple ensemble.
 """
 
 import streamlit as st
@@ -12,14 +12,11 @@ import logging
 from datetime import datetime, timedelta
 
 from prophet import Prophet
-from statsmodels.tsa.statespace.sarimax import SARIMAX
-from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
-from statsmodels.tsa.seasonal import seasonal_decompose
-import warnings
-warnings.filterwarnings('ignore')
+import pmdarima as pm
 
 # Set up logging
 logging.getLogger('prophet').setLevel(logging.WARNING)
+logging.getLogger('pmdarima').setLevel(logging.WARNING)
 
 # ----------------------------
 # Helper functions
@@ -70,20 +67,9 @@ def load_data(uploaded_file):
         st.error(f"Error loading data: {str(e)}")
         return None
 
-def determine_sarima_order(ts, seasonal_period=12):
-    """
-    Simple heuristic to determine SARIMA order parameters.
-    Returns (p,d,q)(P,D,Q,s) tuple.
-    """
-    try:
-        # Default parameters that work well for most sales data
-        return (1, 1, 1), (1, 1, 1, seasonal_period)
-    except:
-        return (0, 1, 0), (0, 1, 0, seasonal_period)
-
 def train_sarima(train_series, seasonal_period=12):
     """
-    Fit a SARIMA model on the provided train_series using statsmodels.
+    Fit an auto_arima SARIMA model on the provided train_series (pd.Series indexed by datetime).
     Returns the fitted model or None if training fails.
     """
     try:
@@ -95,21 +81,24 @@ def train_sarima(train_series, seasonal_period=12):
         if train_series.var() == 0:
             raise ValueError("Sales data is constant - cannot fit SARIMA model")
         
-        # Determine SARIMA parameters
-        order, seasonal_order = determine_sarima_order(train_series, seasonal_period)
-        
-        # Fit SARIMA model
-        model = SARIMAX(
+        # auto_arima will search for best (p,d,q)(P,D,Q,12) based on AIC
+        model = pm.auto_arima(
             train_series,
-            order=order,
-            seasonal_order=seasonal_order,
-            enforce_stationarity=False,
-            enforce_invertibility=False
+            start_p=0, max_p=3,
+            start_q=0, max_q=3,
+            d=None,           # let auto detect
+            seasonal=True,
+            m=seasonal_period,
+            start_P=0, max_P=2,
+            start_Q=0, max_Q=2,
+            D=None,           # let auto detect seasonal differencing
+            trace=False,
+            error_action='ignore',
+            suppress_warnings=True,
+            stepwise=True,
+            random_state=42
         )
-        
-        fitted_model = model.fit(disp=False)
-        return fitted_model
-        
+        return model
     except Exception as e:
         st.error(f"SARIMA training failed: {str(e)}")
         return None
@@ -125,22 +114,19 @@ def forecast_sarima(_model, n_periods, last_date):
         return None
     
     try:
-        # Get forecast
-        forecast_result = _model.forecast(steps=n_periods)
-        conf_int = _model.get_forecast(steps=n_periods).conf_int()
+        preds, conf_int = _model.predict(n_periods=n_periods, return_conf_int=True)
         
         # Ensure predictions are non-negative
-        preds = np.maximum(forecast_result.values, 0)
+        preds = np.maximum(preds, 0)
         
         # Build the future months index
         future_months = pd.date_range(start=last_date + pd.offsets.MonthBegin(1), 
                                       periods=n_periods, freq='MS')
-        
         df_forecast = pd.DataFrame({
             'Month': future_months,
             'SARIMA_Forecast': preds,
-            'SARIMA_Lower': np.maximum(conf_int.iloc[:, 0], 0),
-            'SARIMA_Upper': conf_int.iloc[:, 1]
+            'SARIMA_Lower': conf_int[:, 0],
+            'SARIMA_Upper': conf_int[:, 1]
         })
         return df_forecast
     except Exception as e:
@@ -298,7 +284,7 @@ if uploaded_file:
                     
                     if sarima_model:
                         st.success("SARIMA training completed")
-                        st.write(f"Model summary available")
+                        st.write(f"Model: {sarima_model}")
                         sarima_forecast_df = forecast_sarima(sarima_model, n_periods=12, last_date=train_df['Month'].max())
                     else:
                         sarima_forecast_df = None
