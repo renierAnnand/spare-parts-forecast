@@ -642,7 +642,6 @@ def run_advanced_xgb_forecast(data, forecast_periods=12, scaling_factor=1.0):
             final_model = GradientBoostingRegressor(
                 **best_params,
                 subsample=0.8,
-                colsample_bytree=0.8,
                 random_state=42
             )
         else:
