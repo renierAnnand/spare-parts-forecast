@@ -1,4 +1,8 @@
 import streamlit as st
+
+# Configure streamlit FIRST - must be before any other st commands
+st.set_page_config(page_title="Sales Forecasting Dashboard", layout="wide")
+
 import pandas as pd
 import numpy as np
 import logging
@@ -23,9 +27,6 @@ from sklearn.linear_model import LinearRegression
 
 import warnings
 warnings.filterwarnings("ignore")
-
-# Configure streamlit
-st.set_page_config(page_title="Sales Forecasting Dashboard", layout="wide")
 
 # ----------------------------
 # Helper functions
