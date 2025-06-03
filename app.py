@@ -392,12 +392,18 @@ def optimize_sarima_parameters(data, max_p=3, max_d=2, max_q=3, seasonal_periods
 def run_advanced_sarima_forecast(data, forecast_periods=12, scaling_factor=1.0):
     """Advanced SARIMA with parameter optimization"""
     try:
+        # Create a copy to avoid modifying original data
+        work_data = data.copy()
+        
+        # Check if data was log transformed
+        log_transformed = 'log_transformed' in work_data.columns and work_data['log_transformed'].iloc[0]
+        
         # Optimize parameters
         with st.spinner("🔧 Optimizing SARIMA parameters..."):
-            best_params = optimize_sarima_parameters(data)
+            best_params = optimize_sarima_parameters(work_data)
         
         model = SARIMAX(
-            data['Sales'], 
+            work_data['Sales'], 
             order=best_params['order'],
             seasonal_order=best_params['seasonal_order'],
             enforce_stationarity=False,
@@ -406,11 +412,13 @@ def run_advanced_sarima_forecast(data, forecast_periods=12, scaling_factor=1.0):
         fitted_model = model.fit(disp=False, maxiter=100)
         
         forecast = fitted_model.forecast(steps=forecast_periods)
-        forecast = np.maximum(forecast, 0) * scaling_factor
         
-        # Reverse log transformation if applied
-        if 'log_transformed' in data.columns and data['log_transformed'].iloc[0]:
+        # Reverse log transformation first if applied
+        if log_transformed:
             forecast = np.expm1(forecast)
+        
+        # Then apply scaling and ensure positive values
+        forecast = np.maximum(forecast, 0) * scaling_factor
         
         return forecast, fitted_model.aic
         
@@ -422,7 +430,13 @@ def run_advanced_sarima_forecast(data, forecast_periods=12, scaling_factor=1.0):
 def run_advanced_prophet_forecast(data, forecast_periods=12, scaling_factor=1.0):
     """Enhanced Prophet with hyperparameter optimization"""
     try:
-        prophet_data = data[['Month', 'Sales']].rename(columns={'Month': 'ds', 'Sales': 'y'})
+        # Create a copy to avoid modifying original data
+        work_data = data.copy()
+        
+        # Check if data was log transformed
+        log_transformed = 'log_transformed' in work_data.columns and work_data['log_transformed'].iloc[0]
+        
+        prophet_data = work_data[['Month', 'Sales']].rename(columns={'Month': 'ds', 'Sales': 'y'})
         
         # Test different Prophet configurations
         configs = [
@@ -477,11 +491,12 @@ def run_advanced_prophet_forecast(data, forecast_periods=12, scaling_factor=1.0)
         forecast = model.predict(future)
         forecast_values = forecast['yhat'].tail(forecast_periods).values
         
-        forecast_values = np.maximum(forecast_values, 0) * scaling_factor
-        
-        # Reverse log transformation if applied
-        if 'log_transformed' in data.columns and data['log_transformed'].iloc[0]:
+        # Reverse log transformation first if applied
+        if log_transformed:
             forecast_values = np.expm1(forecast_values)
+        
+        # Then apply scaling and ensure positive values
+        forecast_values = np.maximum(forecast_values, 0) * scaling_factor
         
         return forecast_values, best_mae
         
@@ -493,6 +508,12 @@ def run_advanced_prophet_forecast(data, forecast_periods=12, scaling_factor=1.0)
 def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0):
     """Advanced ETS with automatic model selection"""
     try:
+        # Create a copy to avoid modifying original data
+        work_data = data.copy()
+        
+        # Check if data was log transformed
+        log_transformed = 'log_transformed' in work_data.columns and work_data['log_transformed'].iloc[0]
+        
         # Test different ETS configurations
         configs = [
             {'seasonal': 'add', 'trend': 'add', 'damped_trend': False},
@@ -509,7 +530,7 @@ def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0):
         for config in configs:
             try:
                 model = ExponentialSmoothing(
-                    data['Sales'],
+                    work_data['Sales'],
                     seasonal=config['seasonal'],
                     seasonal_periods=12 if config['seasonal'] else None,
                     trend=config['trend'],
@@ -524,11 +545,13 @@ def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0):
         
         if best_model is not None:
             forecast = best_model.forecast(steps=forecast_periods)
-            forecast = np.maximum(forecast, 0) * scaling_factor
             
-            # Reverse log transformation if applied
-            if 'log_transformed' in data.columns and data['log_transformed'].iloc[0]:
+            # Reverse log transformation first if applied
+            if log_transformed:
                 forecast = np.expm1(forecast)
+            
+            # Then apply scaling and ensure positive values
+            forecast = np.maximum(forecast, 0) * scaling_factor
             
             return forecast, best_aic
         else:
@@ -542,8 +565,14 @@ def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0):
 def run_advanced_xgb_forecast(data, forecast_periods=12, scaling_factor=1.0):
     """Advanced XGBoost with hyperparameter optimization and feature engineering"""
     try:
+        # Create a copy to avoid modifying original data
+        work_data = data.copy()
+        
+        # Check if data was log transformed
+        log_transformed = 'log_transformed' in work_data.columns and work_data['log_transformed'].iloc[0]
+        
         # Create advanced features
-        df = create_advanced_features(data)
+        df = create_advanced_features(work_data)
         
         # Get feature columns
         feature_cols = [col for col in df.columns if col not in ['Month', 'Sales', 'Sales_Original', 'log_transformed']]
@@ -700,6 +729,110 @@ def run_advanced_xgb_forecast(data, forecast_periods=12, scaling_factor=1.0):
             pred = max(pred, 0)
             forecasts.append(pred)
         
+        forecasts = np.array(forecasts)
+        
+        # Reverse log transformation first if applied
+        if log_transformed:
+            forecasts = np.expm1(forecasts)
+        
+        # Then apply scaling and ensure positive values
+        forecasts = np.maximum(forecasts, 0) * scaling_factor
+        
+        return forecasts, best_score
+        
+    except Exception as e:
+        st.warning(f"Advanced XGBoost failed: {str(e)}. Using fallback.")
+        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.infparams:
+            final_model = GradientBoostingRegressor(
+                **best_params,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                random_state=42
+            )
+        else:
+            final_model = GradientBoostingRegressor(n_estimators=200, max_depth=6, learning_rate=0.1, random_state=42)
+        
+        final_model.fit(X_scaled, y)
+        
+        # Generate forecasts using direct prediction
+        forecasts = []
+        last_known_data = df.iloc[-1:].copy()
+        
+        for i in range(forecast_periods):
+            # Create future date
+            future_date = df['Month'].iloc[-1] + pd.DateOffset(months=i+1)
+            
+            # Create feature vector for future month
+            future_row = last_known_data.copy()
+            future_row['Month'] = future_date
+            future_row['month'] = future_date.month
+            future_row['year'] = future_date.year
+            future_row['quarter'] = future_date.quarter
+            future_row['day_of_year'] = future_date.dayofyear
+            future_row['week_of_year'] = future_date.isocalendar().week
+            
+            # Cyclical features
+            future_row['month_sin'] = np.sin(2 * np.pi * future_date.month / 12)
+            future_row['month_cos'] = np.cos(2 * np.pi * future_date.month / 12)
+            future_row['quarter_sin'] = np.sin(2 * np.pi * future_date.quarter / 4)
+            future_row['quarter_cos'] = np.cos(2 * np.pi * future_date.quarter / 4)
+            
+            # Use historical patterns for other features
+            recent_sales = df['Sales'].tail(24).values
+            
+            # Lag features - use historical data
+            for lag in [1, 2, 3, 6, 12, 24]:
+                if lag <= len(recent_sales):
+                    future_row[f'lag_{lag}'] = recent_sales[-lag]
+                else:
+                    future_row[f'lag_{lag}'] = np.mean(recent_sales)
+            
+            # Rolling statistics
+            for window in [3, 6, 12, 24]:
+                window_data = recent_sales[-window:] if window <= len(recent_sales) else recent_sales
+                future_row[f'rolling_mean_{window}'] = np.mean(window_data)
+                future_row[f'rolling_std_{window}'] = np.std(window_data)
+                future_row[f'rolling_median_{window}'] = np.median(window_data)
+                future_row[f'rolling_min_{window}'] = np.min(window_data)
+                future_row[f'rolling_max_{window}'] = np.max(window_data)
+            
+            # EMA features
+            for alpha in [0.1, 0.3, 0.5]:
+                future_row[f'ema_{alpha}'] = np.mean(recent_sales)  # Simplified
+            
+            # Growth features
+            if len(recent_sales) > 1:
+                future_row['mom_growth'] = (recent_sales[-1] - recent_sales[-2]) / recent_sales[-2]
+            if len(recent_sales) > 12:
+                future_row['yoy_growth'] = (recent_sales[-1] - recent_sales[-13]) / recent_sales[-13]
+            
+            # Seasonal features
+            if len(recent_sales) >= 12:
+                future_row['seasonal_diff'] = 0  # Assume no change
+                future_row['seasonal_ratio'] = 1  # Assume no change
+            
+            # Trend features
+            for window in [6, 12, 24]:
+                if window <= len(recent_sales):
+                    trend_data = recent_sales[-window:]
+                    if len(trend_data) > 1:
+                        x_vals = np.arange(len(trend_data))
+                        slope, _, _, _, _ = stats.linregress(x_vals, trend_data)
+                        future_row[f'trend_{window}'] = slope
+            
+            # Volatility features
+            for window in [6, 12]:
+                if window <= len(recent_sales):
+                    vol_data = recent_sales[-window:]
+                    future_row[f'volatility_{window}'] = np.std(vol_data) / np.mean(vol_data)
+            
+            # Make prediction
+            future_features = future_row[feature_cols].fillna(0)
+            future_scaled = scaler.transform(future_features.values.reshape(1, -1))
+            pred = final_model.predict(future_scaled)[0]
+            pred = max(pred, 0)
+            forecasts.append(pred)
+        
         forecasts = np.array(forecasts) * scaling_factor
         
         # Reverse log transformation if applied
@@ -715,29 +848,50 @@ def run_advanced_xgb_forecast(data, forecast_periods=12, scaling_factor=1.0):
 
 def run_fallback_forecast(data, forecast_periods=12, scaling_factor=1.0):
     """Robust fallback forecasting method"""
-    if len(data) >= 12:
-        # Use seasonal naive with trend
-        seasonal_pattern = data['Sales'].tail(12).values
-        recent_trend = np.polyfit(range(len(data['Sales'].tail(12))), data['Sales'].tail(12), 1)[0]
+    try:
+        # Create a copy to avoid modifying original data
+        work_data = data.copy()
         
-        forecast = []
-        for i in range(forecast_periods):
-            seasonal_val = seasonal_pattern[i % 12]
-            trend_adjustment = recent_trend * (i + 1)
-            forecast.append(max(seasonal_val + trend_adjustment, seasonal_val * 0.5))
+        # Check if data was log transformed
+        log_transformed = 'log_transformed' in work_data.columns and work_data['log_transformed'].iloc[0]
         
-        forecast = np.array(forecast) * scaling_factor
-        
-        # Reverse log transformation if applied
-        if 'log_transformed' in data.columns and data['log_transformed'].iloc[0]:
-            forecast = np.expm1(forecast)
-        
-        return forecast
-    else:
-        base_forecast = data['Sales'].mean() * scaling_factor
-        if 'log_transformed' in data.columns and data['log_transformed'].iloc[0]:
-            base_forecast = np.expm1(base_forecast)
-        return np.array([base_forecast] * forecast_periods)
+        if len(work_data) >= 12:
+            # Use seasonal naive with trend
+            seasonal_pattern = work_data['Sales'].tail(12).values
+            recent_trend = np.polyfit(range(len(work_data['Sales'].tail(12))), work_data['Sales'].tail(12), 1)[0]
+            
+            forecast = []
+            for i in range(forecast_periods):
+                seasonal_val = seasonal_pattern[i % 12]
+                trend_adjustment = recent_trend * (i + 1)
+                forecast.append(max(seasonal_val + trend_adjustment, seasonal_val * 0.5))
+            
+            forecast = np.array(forecast)
+            
+            # Reverse log transformation first if applied
+            if log_transformed:
+                forecast = np.expm1(forecast)
+            
+            # Then apply scaling
+            forecast = forecast * scaling_factor
+            
+            return forecast
+        else:
+            base_forecast = work_data['Sales'].mean()
+            
+            # Reverse log transformation first if applied
+            if log_transformed:
+                base_forecast = np.expm1(base_forecast)
+            
+            # Then apply scaling
+            base_forecast = base_forecast * scaling_factor
+            
+            return np.array([base_forecast] * forecast_periods)
+            
+    except Exception as e:
+        # Ultimate fallback - use historical mean
+        historical_mean = data['Sales'].mean() if len(data) > 0 else 1000
+        return np.array([historical_mean * scaling_factor] * forecast_periods)
 
 
 def create_weighted_ensemble(forecasts_dict, validation_scores):
@@ -1062,11 +1216,32 @@ def main():
                     forecast_values = model_func(hist_df, forecast_periods=12, scaling_factor=scaling_factor)[0]
                     validation_score = np.inf
                 
-                forecast_results[f"{model_name}_Forecast"] = forecast_values
-                validation_scores[model_name] = validation_score
-                
-                score_text = f" (Validation Score: {validation_score:.2f})" if validation_score != np.inf else ""
-                st.success(f"✅ Advanced {model_name} completed{score_text}")
+                # Validate forecast values and fix any issues
+                if isinstance(forecast_values, (list, np.ndarray)):
+                    forecast_values = np.array(forecast_values)
+                    # Check for valid forecasts
+                    if len(forecast_values) == 12 and not np.all(forecast_values == 0):
+                        forecast_results[f"{model_name}_Forecast"] = forecast_values
+                        validation_scores[model_name] = validation_score
+                        
+                        # Show forecast range for debugging
+                        min_val, max_val = np.min(forecast_values), np.max(forecast_values)
+                        score_text = f" (Range: {min_val:,.0f} - {max_val:,.0f})"
+                        if validation_score != np.inf:
+                            score_text += f" (Score: {validation_score:.2f})"
+                        st.success(f"✅ Advanced {model_name} completed{score_text}")
+                    else:
+                        # Use fallback if forecast is invalid
+                        st.warning(f"⚠️ {model_name} produced invalid forecast, using fallback")
+                        fallback_forecast = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
+                        forecast_results[f"{model_name}_Forecast"] = fallback_forecast
+                        validation_scores[model_name] = np.inf
+                else:
+                    # Use fallback if forecast format is wrong
+                    st.warning(f"⚠️ {model_name} returned invalid format, using fallback")
+                    fallback_forecast = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
+                    forecast_results[f"{model_name}_Forecast"] = fallback_forecast
+                    validation_scores[model_name] = np.inf
                 
             except Exception as e:
                 st.error(f"❌ Advanced {model_name} failed: {str(e)}")
@@ -1110,6 +1285,26 @@ def main():
 
     # Display results
     st.subheader("📊 Advanced Forecast Results")
+    
+    # Debug information - show forecast summaries
+    if forecast_results:
+        st.subheader("🔍 Forecast Summary (Debugging)")
+        debug_data = []
+        for model_name, forecast_values in forecast_results.items():
+            if isinstance(forecast_values, (list, np.ndarray)):
+                forecast_array = np.array(forecast_values)
+                debug_data.append({
+                    'Model': model_name,
+                    'Min Value': f"{np.min(forecast_array):,.0f}",
+                    'Max Value': f"{np.max(forecast_array):,.0f}",
+                    'Mean Value': f"{np.mean(forecast_array):,.0f}",
+                    'Total Annual': f"{np.sum(forecast_array):,.0f}",
+                    'All Zero?': str(np.all(forecast_array == 0))
+                })
+        
+        if debug_data:
+            debug_df = pd.DataFrame(debug_data)
+            st.dataframe(debug_df, use_container_width=True)
 
     # Show forecast table with enhanced formatting
     display_df = result_df.copy()
