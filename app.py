@@ -51,6 +51,7 @@ class MetaLearner(BaseEstimator, RegressorMixin):
 def load_data(uploaded_file):
     """
     Load and preprocess the historical sales data with advanced preprocessing.
+    Properly aggregates multiple entries per month.
     """
     try:
         df = pd.read_excel(uploaded_file)
@@ -62,20 +63,47 @@ def load_data(uploaded_file):
         st.error("The file must contain 'Month' and 'Sales' columns.")
         return None
 
+    # Parse dates
     df["Month"] = pd.to_datetime(df["Month"], errors="coerce")
     if df["Month"].isna().any():
         st.error("Some dates could not be parsed. Please check the 'Month' column format.")
         return None
 
+    # Clean sales data
     df["Sales"] = pd.to_numeric(df["Sales"], errors="coerce").fillna(0)
     df["Sales"] = df["Sales"].abs()
 
+    # Sort by date
     df = df.sort_values("Month").reset_index(drop=True)
     
-    # Advanced preprocessing
-    df = preprocess_data(df)
+    # Check if there are multiple entries per month
+    original_rows = len(df)
+    unique_months = df['Month'].nunique()
     
-    return df[["Month", "Sales", "Sales_Original"]]
+    if original_rows > unique_months:
+        st.info(f"📊 Aggregating {original_rows} data points into {unique_months} monthly totals...")
+        
+        # Store original for reference
+        df_original = df.copy()
+        
+        # Aggregate by month - sum all sales for each month
+        df_monthly = df.groupby('Month', as_index=False).agg({
+            'Sales': 'sum'  # Sum all sales for each month
+        }).sort_values('Month').reset_index(drop=True)
+        
+        # Add original sales column for reference
+        df_monthly['Sales_Original'] = df_monthly['Sales'].copy()
+        
+        # Advanced preprocessing on the monthly aggregated data
+        df_processed = preprocess_data(df_monthly)
+        
+        st.success(f"✅ Successfully aggregated to {len(df_processed)} monthly data points")
+        
+    else:
+        # Data is already monthly, just preprocess
+        df_processed = preprocess_data(df)
+    
+    return df_processed[["Month", "Sales", "Sales_Original"]]
 
 
 def preprocess_data(df):
@@ -117,7 +145,7 @@ def preprocess_data(df):
 @st.cache_data
 def load_actual_2024_data(uploaded_file, forecast_year):
     """
-    Load actual data with preprocessing
+    Load actual data with preprocessing - only include months that have actual data
     """
     try:
         df = pd.read_excel(uploaded_file)
@@ -141,7 +169,11 @@ def load_actual_2024_data(uploaded_file, forecast_year):
                 st.warning(f"No rows match year {forecast_year}.")
                 return None
 
-            monthly = df.groupby("Month", as_index=False)["Sales"].sum().sort_values("Month").reset_index(drop=True)
+            # Only include months that have actual non-zero data
+            monthly = df.groupby("Month", as_index=False)["Sales"].sum()
+            monthly = monthly[monthly["Sales"] > 0]  # Only months with actual sales
+            monthly = monthly.sort_values("Month").reset_index(drop=True)
+            
             return monthly.rename(columns={"Sales": f"Actual_{forecast_year}"})
         
         else:
@@ -155,37 +187,51 @@ def load_actual_2024_data(uploaded_file, forecast_year):
                 f"Oct-{forecast_year}", f"Nov-{forecast_year}", f"Dec-{forecast_year}"
             ]
             
+            # Only include month patterns that actually exist in the data
             available_months = [pattern for pattern in month_patterns if pattern in df.columns]
             
             if not available_months:
                 st.error(f"No month columns found for {forecast_year}.")
                 return None
             
+            st.info(f"📅 Found data for months: {', '.join([m.split('-')[0] for m in available_months])}")
+            
             first_col = df.columns[0]
             data_rows = df[~df[first_col].astype(str).str.contains("Item|Code|QTY", case=False, na=False)]
             
             melted_data = []
+            months_with_data = set()  # Track which months actually have data
+            
             for _, row in data_rows.iterrows():
                 for month_col in available_months:
                     if month_col in row and pd.notna(row[month_col]):
-                        month_str = month_col.replace("-", "-01-")
-                        try:
-                            month_date = pd.to_datetime(month_str, format="%b-%d-%Y")
-                            sales_value = pd.to_numeric(row[month_col], errors="coerce")
-                            if pd.notna(sales_value) and sales_value > 0:
+                        sales_value = pd.to_numeric(row[month_col], errors="coerce")
+                        if pd.notna(sales_value) and sales_value > 0:
+                            month_str = month_col.replace("-", "-01-")
+                            try:
+                                month_date = pd.to_datetime(month_str, format="%b-%d-%Y")
                                 melted_data.append({
                                     "Month": month_date,
                                     "Sales": abs(sales_value)
                                 })
-                        except:
-                            continue
+                                months_with_data.add(month_date)
+                            except:
+                                continue
             
             if not melted_data:
                 st.error("No valid sales data found.")
                 return None
             
             long_df = pd.DataFrame(melted_data)
-            monthly = long_df.groupby("Month", as_index=False)["Sales"].sum().sort_values("Month").reset_index(drop=True)
+            
+            # Group by month and sum, but only for months that actually have data
+            monthly = long_df.groupby("Month", as_index=False)["Sales"].sum()
+            monthly = monthly[monthly["Sales"] > 0]  # Only months with actual sales data
+            monthly = monthly.sort_values("Month").reset_index(drop=True)
+            
+            # Show which months were actually processed
+            processed_months = monthly['Month'].dt.strftime('%b').tolist()
+            st.success(f"✅ Successfully processed data for: {', '.join(processed_months)}")
             
             return monthly.rename(columns={"Sales": f"Actual_{forecast_year}"})
             
@@ -755,6 +801,73 @@ def run_meta_learning_forecast(forecasts_dict, actual_data=None, forecast_period
         return None
 
 
+def create_comparison_chart_for_available_months_only(result_df, forecast_year):
+    """
+    Create comparison chart only for months where actual data exists
+    """
+    actual_col = f'Actual_{forecast_year}'
+    
+    if actual_col not in result_df.columns:
+        return None
+    
+    # Filter to only months that have actual data
+    available_data = result_df[result_df[actual_col].notna()].copy()
+    
+    if len(available_data) == 0:
+        return None
+    
+    # Also filter forecast data to the same months for fair comparison
+    forecast_cols = [col for col in result_df.columns if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']]
+    
+    fig = go.Figure()
+    
+    # Add actual data
+    fig.add_trace(go.Scatter(
+        x=available_data['Month'],
+        y=available_data[actual_col],
+        mode='lines+markers',
+        name='🎯 ACTUAL',
+        line=dict(color='#FF6B6B', width=4),
+        marker=dict(size=12, symbol='circle')
+    ))
+    
+    # Add forecast data for the same months
+    colors = ['#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#FF9F43', '#6C5CE7']
+    for i, col in enumerate(forecast_cols):
+        if col in ['Weighted_Ensemble', 'Meta_Learning']:
+            line_style = dict(color='#6C5CE7', width=3, dash='dash') if col == 'Weighted_Ensemble' else dict(color='#00D2D3', width=3, dash='dot')
+            icon = '🔥' if col == 'Weighted_Ensemble' else '🧠'
+        else:
+            line_style = dict(color=colors[i % len(colors)], width=2)
+            icon = '📈'
+        
+        model_name = col.replace('_Forecast', '').replace('_', ' ').upper()
+        fig.add_trace(go.Scatter(
+            x=available_data['Month'],
+            y=available_data[col],
+            mode='lines+markers',
+            name=f'{icon} {model_name}',
+            line=line_style,
+            marker=dict(size=6)
+        ))
+    
+    # Show available months in title
+    month_names = available_data['Month'].dt.strftime('%b').tolist()
+    months_text = ', '.join(month_names)
+    
+    fig.update_layout(
+        title=f'🚀 ADVANCED AI MODELS vs ACTUAL PERFORMANCE<br><sub>Comparison for available months: {months_text}</sub>',
+        xaxis_title='Month',
+        yaxis_title='Sales Volume',
+        height=700,
+        hovermode='x unified',
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5)
+    )
+    
+    return fig
+
+
 def main():
     """
     Main function to run the advanced forecasting app.
@@ -829,14 +942,19 @@ def main():
 
     # Display enhanced data info
     st.subheader("📊 Advanced Data Analysis")
-    
+
+    # Calculate correct metrics based on unique months
+    unique_months = hist_df['Month'].nunique()  # Count unique months only
+    total_sales = hist_df['Sales'].sum()
+    avg_monthly_sales = hist_df.groupby('Month')['Sales'].sum().mean()  # Average per unique month
+
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("📅 Total Months", len(hist_df))
+        st.metric("📅 Total Months", unique_months)  # Fixed: now shows unique months
     with col2:
-        st.metric("📈 Avg Monthly Sales", f"{hist_df['Sales'].mean():,.0f}")
+        st.metric("📈 Avg Monthly Sales", f"{avg_monthly_sales:,.0f}")  # Fixed: true monthly average
     with col3:
-        data_quality = min(100, len(hist_df) * 4.17)  # Quality score based on data length
+        data_quality = min(100, unique_months * 4.17)  # Quality score based on unique months
         st.metric("🎯 Data Quality Score", f"{data_quality:.0f}%")
     with col4:
         if 'log_transformed' in hist_df.columns and hist_df['log_transformed'].iloc[0]:
@@ -844,21 +962,53 @@ def main():
         else:
             st.metric("🔧 Data Transformation", "None Applied")
 
-    # Show data insights
+    # Show additional data insights
     col1, col2 = st.columns(2)
     with col1:
-        # Seasonality detection
-        if len(hist_df) >= 24:
-            decomposition = seasonal_decompose(hist_df['Sales'], model='additive', period=12)
-            seasonal_strength = np.var(decomposition.seasonal) / np.var(hist_df['Sales'])
-            st.metric("📊 Seasonality Strength", f"{seasonal_strength:.2%}")
+        # Date range
+        start_date = hist_df['Month'].min().strftime('%Y-%m')
+        end_date = hist_df['Month'].max().strftime('%Y-%m')
+        st.metric("📅 Data Range", f"{start_date} to {end_date}")
         
     with col2:
-        # Trend detection
-        if len(hist_df) >= 12:
-            recent_trend = np.polyfit(range(len(hist_df['Sales'].tail(12))), hist_df['Sales'].tail(12), 1)[0]
-            trend_direction = "📈 Increasing" if recent_trend > 0 else "📉 Decreasing"
-            st.metric("📈 Recent Trend", trend_direction)
+        # Total data points vs unique months
+        total_rows = len(hist_df)
+        if total_rows > unique_months:
+            st.metric("📊 Data Points", f"{total_rows} rows ({unique_months} unique months)")
+        else:
+            st.metric("📊 Data Points", f"{total_rows}")
+
+    # Show data breakdown if there are multiple entries per month
+    if len(hist_df) > unique_months:
+        avg_entries_per_month = len(hist_df) / unique_months
+        st.info(f"📊 Your data contains multiple entries per month (avg: {avg_entries_per_month:.1f} entries/month). Sales are being aggregated by month for forecasting.")
+
+    # Show seasonality and trend analysis
+    col1, col2 = st.columns(2)
+    with col1:
+        # Seasonality detection - use monthly aggregated data
+        monthly_data = hist_df.groupby('Month')['Sales'].sum().reset_index()
+        if len(monthly_data) >= 24:
+            try:
+                decomposition = seasonal_decompose(monthly_data['Sales'], model='additive', period=12)
+                seasonal_strength = np.var(decomposition.seasonal) / np.var(monthly_data['Sales'])
+                st.metric("📊 Seasonality Strength", f"{seasonal_strength:.2%}")
+            except:
+                st.metric("📊 Seasonality", "Analysis unavailable")
+        else:
+            st.metric("📊 Seasonality", "Need 24+ months")
+        
+    with col2:
+        # Trend detection - use monthly aggregated data
+        if len(monthly_data) >= 12:
+            try:
+                recent_trend = np.polyfit(range(len(monthly_data['Sales'].tail(12))), monthly_data['Sales'].tail(12), 1)[0]
+                trend_direction = "📈 Increasing" if recent_trend > 0 else "📉 Decreasing"
+                st.metric("📈 Recent Trend", trend_direction)
+            except:
+                st.metric("📈 Recent Trend", "Analysis unavailable")
+        else:
+            st.metric("📈 Recent Trend", "Need 12+ months")
 
     # Show preprocessing results
     if enable_preprocessing and 'Sales_Original' in hist_df.columns:
@@ -973,92 +1123,62 @@ def main():
 
     # ADVANCED COMPARISON CHART
     st.subheader("📊 Advanced Model Performance Comparison")
-    
+
     model_cols = [col for col in result_df.columns if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']]
     actual_col = f'Actual_{forecast_year}'
-    
-    fig = go.Figure()
-    
+
     has_actual_data = actual_col in result_df.columns and result_df[actual_col].notna().any()
-    
+
     if has_actual_data:
-        actual_data = result_df[result_df[actual_col].notna()]
+        # Get only months with actual data
+        actual_data = result_df[result_df[actual_col].notna()].copy()
         
-        # Add actual data
-        fig.add_trace(go.Scatter(
-            x=actual_data['Month'],
-            y=actual_data[actual_col],
-            mode='lines+markers',
-            name='🎯 ACTUAL',
-            line=dict(color='#FF6B6B', width=4),
-            marker=dict(size=12, symbol='circle')
-        ))
+        # Show info about available data coverage
+        available_months = actual_data['Month'].dt.strftime('%b %Y').tolist()
+        st.info(f"📅 **Available actual data for {len(available_months)} months:** {', '.join(available_months)}")
         
-        # Add model forecasts
-        colors = ['#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#FF9F43', '#6C5CE7']
-        for i, col in enumerate(model_cols):
-            if col in ['Weighted_Ensemble', 'Meta_Learning']:
-                # Special styling for advanced ensembles
-                line_style = dict(color='#6C5CE7', width=3, dash='dash') if col == 'Weighted_Ensemble' else dict(color='#00D2D3', width=3, dash='dot')
-                icon = '🔥' if col == 'Weighted_Ensemble' else '🧠'
-            else:
-                line_style = dict(color=colors[i % len(colors)], width=2)
-                icon = '📈'
-            
-            model_name = col.replace('_Forecast', '').replace('_', ' ').upper()
-            fig.add_trace(go.Scatter(
-                x=result_df['Month'],
-                y=result_df[col],
-                mode='lines+markers',
-                name=f'{icon} {model_name}',
-                line=line_style,
-                marker=dict(size=6)
-            ))
+        # Create improved comparison chart
+        fig = create_comparison_chart_for_available_months_only(result_df, forecast_year)
         
-        fig.update_layout(
-            title='🚀 ADVANCED AI MODELS vs ACTUAL PERFORMANCE',
-            xaxis_title='Month',
-            yaxis_title='Sales Volume',
-            height=700,
-            hovermode='x unified',
-            showlegend=True,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5)
-        )
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
         
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Advanced performance metrics
+        # Advanced performance metrics - only for available months
         st.subheader("🎯 Advanced Performance Analysis")
+        st.caption(f"Performance calculated only for months with actual data ({len(actual_data)} months)")
         
         performance_data = []
         actual_total = actual_data[actual_col].sum()
         
         for col in model_cols:
             model_name = col.replace('_Forecast', '').replace('_', ' ')
-            forecast_total = result_df[col].sum()
             
-            actual_subset = result_df[result_df[actual_col].notna()]
-            if len(actual_subset) > 0:
-                metrics = calculate_accuracy_metrics(actual_subset[actual_col], actual_subset[col])
-                if metrics:
-                    bias = ((forecast_total - actual_total) / actual_total * 100) if actual_total > 0 else 0
-                    
-                    # Get validation score if available
-                    val_score = validation_scores.get(model_name.replace(' ', ''), 'N/A')
-                    val_score_text = f"{val_score:.2f}" if val_score != np.inf and val_score != 'N/A' else 'N/A'
-                    
-                    performance_data.append({
-                        'Model': model_name,
-                        'MAPE (%)': f"{metrics['MAPE']:.1f}%",
-                        'SMAPE (%)': f"{metrics['SMAPE']:.1f}%",
-                        'MAE': f"{metrics['MAE']:,.0f}",
-                        'RMSE': f"{metrics['RMSE']:,.0f}",
-                        'MASE': f"{metrics['MASE']:.2f}",
-                        'Total Forecast': f"{forecast_total:,.0f}",
-                        'Bias (%)': f"{bias:+.1f}%",
-                        'Validation Score': val_score_text,
-                        'Accuracy': f"{100 - metrics['MAPE']:.1f}%"
-                    })
+            # Calculate forecast total only for months with actual data
+            forecast_total = actual_data[col].sum()
+            
+            # Calculate metrics only for available months
+            metrics = calculate_accuracy_metrics(actual_data[actual_col], actual_data[col])
+            if metrics:
+                bias = ((forecast_total - actual_total) / actual_total * 100) if actual_total > 0 else 0
+                
+                # Get validation score if available
+                val_score = validation_scores.get(model_name.replace(' ', ''), 'N/A')
+                val_score_text = f"{val_score:.2f}" if val_score != np.inf and val_score != 'N/A' else 'N/A'
+                
+                performance_data.append({
+                    'Model': model_name,
+                    'MAPE (%)': f"{metrics['MAPE']:.1f}%",
+                    'SMAPE (%)': f"{metrics['SMAPE']:.1f}%",
+                    'MAE': f"{metrics['MAE']:,.0f}",
+                    'RMSE': f"{metrics['RMSE']:,.0f}",
+                    'MASE': f"{metrics['MASE']:.2f}",
+                    'Total Forecast (Available Months)': f"{forecast_total:,.0f}",
+                    'Total Actual (Available Months)': f"{actual_total:,.0f}",
+                    'Bias (%)': f"{bias:+.1f}%",
+                    'Validation Score': val_score_text,
+                    'Accuracy': f"{100 - metrics['MAPE']:.1f}%",
+                    'Data Coverage': f"{len(actual_data)}/12 months"
+                })
         
         if performance_data:
             performance_df = pd.DataFrame(performance_data)
@@ -1067,6 +1187,11 @@ def main():
             # Show best performing model
             best_model = performance_df.loc[performance_df['MAPE (%)'].str.replace('%', '').astype(float).idxmin()]
             st.success(f"🏆 Best performing model: **{best_model['Model']}** with {best_model['MAPE (%)']} MAPE")
+            
+            # Show data coverage info
+            coverage_pct = len(actual_data) / 12 * 100
+            if coverage_pct < 100:
+                st.warning(f"⚠️ Performance analysis based on {len(actual_data)} months of actual data ({coverage_pct:.0f}% coverage)")
 
     else:
         # Forecast-only view
@@ -1157,20 +1282,29 @@ def main():
             data_analysis = []
             
             # Seasonality analysis
-            if len(hist_df) >= 24:
-                decomposition = seasonal_decompose(hist_df['Sales'], model='additive', period=12)
-                seasonal_strength = np.var(decomposition.seasonal) / np.var(hist_df['Sales'])
-                data_analysis.append({'Metric': 'Seasonality_Strength', 'Value': seasonal_strength})
+            monthly_data = hist_df.groupby('Month')['Sales'].sum().reset_index()
+            if len(monthly_data) >= 24:
+                try:
+                    decomposition = seasonal_decompose(monthly_data['Sales'], model='additive', period=12)
+                    seasonal_strength = np.var(decomposition.seasonal) / np.var(monthly_data['Sales'])
+                    data_analysis.append({'Metric': 'Seasonality_Strength', 'Value': seasonal_strength})
+                except:
+                    pass
             
             # Trend analysis
-            if len(hist_df) >= 12:
-                recent_trend = np.polyfit(range(len(hist_df['Sales'].tail(12))), hist_df['Sales'].tail(12), 1)[0]
-                data_analysis.append({'Metric': 'Recent_Trend_Slope', 'Value': recent_trend})
+            if len(monthly_data) >= 12:
+                try:
+                    recent_trend = np.polyfit(range(len(monthly_data['Sales'].tail(12))), monthly_data['Sales'].tail(12), 1)[0]
+                    data_analysis.append({'Metric': 'Recent_Trend_Slope', 'Value': recent_trend})
+                except:
+                    pass
             
             # Data quality metrics
+            unique_months = hist_df['Month'].nunique()
             data_analysis.extend([
-                {'Metric': 'Data_Points', 'Value': len(hist_df)},
-                {'Metric': 'Data_Quality_Score', 'Value': min(100, len(hist_df) * 4.17)},
+                {'Metric': 'Unique_Months', 'Value': unique_months},
+                {'Metric': 'Total_Data_Points', 'Value': len(hist_df)},
+                {'Metric': 'Data_Quality_Score', 'Value': min(100, unique_months * 4.17)},
                 {'Metric': 'Scaling_Factor', 'Value': scaling_factor},
                 {'Metric': 'Log_Transformed', 'Value': hist_df.get('log_transformed', [False])[0] if len(hist_df) > 0 else False}
             ])
