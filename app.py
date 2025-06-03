@@ -645,7 +645,12 @@ def run_advanced_xgb_forecast(data, forecast_periods=12, scaling_factor=1.0):
                 random_state=42
             )
         else:
-            final_model = GradientBoostingRegressor(n_estimators=200, max_depth=6, learning_rate=0.1, random_state=42)
+            final_model = GradientBoostingRegressor(
+                n_estimators=200, 
+                max_depth=6, 
+                learning_rate=0.1, 
+                random_state=42
+            )
         
         final_model.fit(X_scaled, y)
         
