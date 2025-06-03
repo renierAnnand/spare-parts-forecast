@@ -1212,8 +1212,13 @@ def main():
                     forecast_values, validation_score = model_func(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
                 else:
                     # Use basic version if hyperopt disabled
-                    forecast_values = model_func(hist_df, forecast_periods=12, scaling_factor=scaling_factor)[0]
-                    validation_score = np.inf
+                    result = model_func(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
+                    if isinstance(result, tuple):
+                        forecast_values = result[0]
+                        validation_score = result[1] if len(result) > 1 else np.inf
+                    else:
+                        forecast_values = result
+                        validation_score = np.inf
                 
                 # Validate forecast values and fix any issues
                 if isinstance(forecast_values, (list, np.ndarray)):
