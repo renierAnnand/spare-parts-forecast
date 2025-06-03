@@ -741,7 +741,7 @@ def run_advanced_xgb_forecast(data, forecast_periods=12, scaling_factor=1.0):
         
     except Exception as e:
         st.warning(f"Advanced XGBoost failed: {str(e)}. Using fallback.")
-        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.infparams:
+        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
             final_model = GradientBoostingRegressor(
                 **best_params,
                 subsample=0.8,
