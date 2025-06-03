@@ -4,381 +4,518 @@ import numpy as np
 import io
 import logging
 from statsmodels.tsa.statespace.sarimax import SARIMAX
+import pmdarima as pm
+from scipy.stats import boxcox, inv_boxcox
 
 st.set_page_config(layout="wide")
-st.title("📈 Spare Parts Forecast (SARIMA, datetime-indexed)")
+st.title("📈 Spare Parts Forecast (MH-Family SARIMA with Exogenous Regressors)")
 
-uploaded_file = st.file_uploader(
-    "Upload Excel file with columns: Part, Month, Sales", type=["xlsx"]
+# —————————————————————————————
+# 1) File Uploaders
+# —————————————————————————————
+
+st.write(
+    """
+    1. Upload an Excel/CSV containing at least these columns:  
+       **Part**, **Family**, **Month**, **Sales**.  
+       - `Family` groups parts by MH-equipment family (e.g. “Linde-Forks”, “JD-Filters”, …).  
+       - `Month` should parseable by pandas (e.g. “2023-05-01” or “May 2023”).  
+       - `Sales` = number of units sold that month.  
+
+    2. (Optional) Upload a second file (Excel/CSV) with two columns:  
+       **Month**, **FleetHours**—total monthly runtime hours for your MH fleet in Saudi Arabia.  
+       This will be used as an exogenous regressor.  
+    """
 )
 
-if uploaded_file:
-    try:
-        # 1) Load and show basic info
+uploaded_parts = st.file_uploader(
+    "Upload Parts × Family × Month × Sales file", type=["xlsx", "csv"]
+)
+uploaded_exog = st.file_uploader(
+    "Upload FleetHours file (Month, FleetHours)  (Optional)", type=["xlsx", "csv"]
+)
+
+if not uploaded_parts:
+    st.info("📥 Please upload the Parts×Family×Month×Sales file to proceed.")
+    st.stop()
+
+# —————————————————————————————
+# 2) Load & Validate Input Data
+# —————————————————————————————
+
+@st.cache_data
+def load_parts_df(uploaded_file):
+    if str(uploaded_file.name).lower().endswith(".csv"):
+        df = pd.read_csv(uploaded_file)
+    else:
         df = pd.read_excel(uploaded_file)
-        st.write(f"Data shape: {df.shape}")
-        st.write("Data preview:")
-        st.dataframe(df.head())
+    return df
 
-        # 2) Verify required columns
-        required_cols = {"Part", "Month", "Sales"}
-        if not required_cols.issubset(df.columns):
-            st.error(
-                f"Please ensure your file has columns: Part, Month, Sales. Found: {list(df.columns)}"
-            )
-            st.stop()
+@st.cache_data
+def load_exog_df(uploaded_file):
+    if str(uploaded_file.name).lower().endswith(".csv"):
+        df = pd.read_csv(uploaded_file)
+    else:
+        df = pd.read_excel(uploaded_file)
+    return df
 
-        # 3) Preprocess input
-        df = df.dropna(subset=["Part", "Month", "Sales"])
-        df["Part"] = df["Part"].astype(str).str.strip()
+df = load_parts_df(uploaded_parts)
 
-        try:
-            df["Month"] = pd.to_datetime(df["Month"])
-        except:
-            st.warning("Attempting alternative date parsing...")
-            df["Month"] = pd.to_datetime(df["Month"], errors="coerce")
+required_cols = {"Part", "Family", "Month", "Sales"}
+if not required_cols.issubset(df.columns):
+    st.error(
+        f"❌ Your file must contain columns: {required_cols}. Found: {list(df.columns)}"
+    )
+    st.stop()
 
-        date_parse_failed = df["Month"].isna().sum()
-        if date_parse_failed > 0:
-            st.warning(f"⚠️ Removed {date_parse_failed} rows with invalid dates")
-            df = df.dropna(subset=["Month"])
+# Drop rows with any missing key fields
+df = df.dropna(subset=["Part", "Family", "Month", "Sales"]).copy()
+df["Part"] = df["Part"].astype(str).str.strip()
+df["Family"] = df["Family"].astype(str).str.strip()
 
-        df["Sales"] = pd.to_numeric(df["Sales"], errors="coerce").fillna(0).astype(float)
+# Parse Month → datetime (coerce invalid)
+df["Month"] = pd.to_datetime(df["Month"], errors="coerce")
+n_invalid = df["Month"].isna().sum()
+if n_invalid > 0:
+    st.warning(f"⚠️ Dropping {n_invalid} rows with invalid Month parse.")
+    df = df.dropna(subset=["Month"])
 
-        # Sales data stats
-        st.write("### Sales Data Statistics:")
-        st.write(f"- Total rows after cleaning: {len(df)}")
-        st.write(f"- Non-zero sales rows: {(df['Sales'] > 0).sum()}")
-        st.write(f"- Average sales: {df['Sales'].mean():.2f}")
-        st.write(f"- Max sales: {df['Sales'].max()}")
-        st.write(f"- Parts with any sales: {df[df['Sales'] > 0]['Part'].nunique()}")
+df["Sales"] = pd.to_numeric(df["Sales"], errors="coerce").fillna(0).astype(float)
 
-        top_parts = df.groupby("Part")["Sales"].sum().sort_values(ascending=False).head(10)
-        if len(top_parts) > 0:
-            st.write("### Top 10 Parts by Total Sales:")
-            st.dataframe(top_parts)
+st.write(f"Data shape after initial cleaning: {df.shape}")
+st.write("Preview of uploaded data:")
+st.dataframe(df.head())
 
-        st.write("### Date Range in Original Data:")
-        date_counts = (
-            df.groupby(df["Month"].dt.to_period("M"))["Sales"]
-            .agg(["count", "sum"])
-            .reset_index()
-        )
-        date_counts["Month"] = date_counts["Month"].dt.to_timestamp()
-        st.dataframe(date_counts.set_index("Month"))
+# —————————————————————————————
+# 3) Load Optional Exogenous (FleetHours) + Build IsRamadanMonth Flag
+# —————————————————————————————
 
-        # 4) Aggregate duplicate (Part, Month) pairs
-        df["Month"] = pd.to_datetime(df["Month"]).dt.to_period("M").dt.to_timestamp()
-        df_grouped = df.groupby(["Part", "Month"])["Sales"].sum().reset_index()
+if uploaded_exog:
+    exog_df = load_exog_df(uploaded_exog)
+    if not {"Month", "FleetHours"}.issubset(exog_df.columns):
+        st.error("❌ Exogenous file must have columns: Month, FleetHours.")
+        st.stop()
+    exog_df["Month"] = pd.to_datetime(exog_df["Month"], errors="coerce")
+    ninv = exog_df["Month"].isna().sum()
+    if ninv > 0:
+        st.warning(f"⚠️ Dropping {ninv} rows from exogenous data with invalid Month.")
+        exog_df = exog_df.dropna(subset=["Month"])
+    exog_df["FleetHours"] = pd.to_numeric(exog_df["FleetHours"], errors="coerce").fillna(0)
+    # Reindex exog to Month→FleetHours
+    fleet_hours = (
+        exog_df
+        .groupby(pd.Grouper(key="Month", freq="MS"))["FleetHours"]
+        .sum()
+        .sort_index()
+    )
+else:
+    # If no exog provided, create a zero series placeholder
+    fleet_hours = pd.Series(dtype=float)
 
-        # 5) Compute overall date range
-        min_date = df_grouped["Month"].min()
-        max_date = df_grouped["Month"].max()
-
-        if pd.isna(min_date) or pd.isna(max_date):
-            st.error(
-                "❌ No valid dates found in the data. Please check your Month column format."
-            )
-            st.stop()
-
-        data_span_months = (
-            (max_date.year - min_date.year) * 12
-            + (max_date.month - min_date.month)
-            + 1
-        )
-        data_span_years = data_span_months / 12
-
-        st.write(
-            f"📅 Historical data covers: {min_date.strftime('%Y-%m')} "
-            f"→ {max_date.strftime('%Y-%m')}"
-        )
-        st.write(f"📦 Total unique parts: {df_grouped['Part'].nunique()}")
-        st.write(f"📊 Total aggregated records: {len(df_grouped)}")
-        st.write(f"📊 Data span: {data_span_months} months ({data_span_years:.1f} years)")
-
-        if data_span_months < 12:
-            st.warning("⚠️ Fewer than 12 months of history total—forecasts may be unreliable.")
-        elif data_span_months < 24:
-            st.info("ℹ️ Between 12 and 24 months of data—consider adding more history.")
+# Build a simple monthly Ramadan indicator (Saudi Arabia) for 2023–2025
+# NOTE: In production, replace this with a full Hijri→Gregorian conversion.
+def build_ramadan_flag(idx):
+    # Approximate: Ramadan 2023: Mar 23 – Apr 21
+    #            Ramadan 2024: Mar 10 – Apr 9
+    #            Ramadan 2025: Feb 28 – Mar 29
+    # We mark any month overlapping these ranges as IsRamadan=1
+    flags = []
+    for ts in idx:
+        y, m = ts.year, ts.month
+        # Check these month ranges:
+        if (y == 2023 and m in (3, 4)) or \
+           (y == 2024 and m in (3, 4)) or \
+           (y == 2025 and m in (2, 3)):
+            flags.append(1)
         else:
-            st.success("✅ Good historical coverage (≥24 months).")
+            flags.append(0)
+    return pd.Series(flags, index=idx)
 
-        # 6) Define monthly indices
-        min_date = min_date.replace(day=1)
-        max_date = max_date.replace(day=1)
-        historical_months = pd.date_range(start=min_date, end=max_date, freq="MS")
-        forecast_start = max_date + pd.DateOffset(months=1)
-        forecast_end = forecast_start + pd.DateOffset(months=11)
-        forecast_months = pd.date_range(start=forecast_start, end=forecast_end, freq="MS")
+# —————————————————————————————
+# 4) Aggregate (Family, Month) at both Family and Part Levels
+# —————————————————————————————
 
-        st.write(
-            f"📅 Historical months: "
-            f"{historical_months[0].strftime('%Y-%m')} to {historical_months[-1].strftime('%Y-%m')} "
-            f"({len(historical_months)} months)"
+# 4.a Family-level: for auto-ARIMA parameter selection
+family_ts = (
+    df
+    .groupby([pd.Grouper(key="Month", freq="MS"), "Family"])["Sales"]
+    .sum()
+    .unstack(fill_value=0)
+    .sort_index()
+)
+
+# 4.b Part-level: sum any duplicates
+part_ts_df = (
+    df
+    .groupby([pd.Grouper(key="Month", freq="MS"), "Part", "Family"])["Sales"]
+    .sum()
+    .reset_index()
+)
+
+# —————————————————————————————
+# 5) Determine Overall Historical Range & Build Month Indices
+# —————————————————————————————
+
+min_date = part_ts_df["Month"].min()
+max_date = part_ts_df["Month"].max()
+min_date = min_date.replace(day=1)
+max_date = max_date.replace(day=1)
+
+historical_months = pd.date_range(start=min_date, end=max_date, freq="MS")
+forecast_start = max_date + pd.DateOffset(months=1)
+forecast_end = forecast_start + pd.DateOffset(months=11)
+forecast_months = pd.date_range(start=forecast_start, end=forecast_end, freq="MS")
+
+st.write(
+    f"📅 Historical data: {min_date.strftime('%Y-%m')} → {max_date.strftime('%Y-%m')} "
+    f"({len(historical_months)} months)."
+)
+st.write(
+    f"🔮 Forecast horizon: {forecast_start.strftime('%Y-%m')} → {forecast_end.strftime('%Y-%m')}."
+)
+
+# Build seasonal Ramadan flags for historical + forecast months
+all_months = historical_months.union(forecast_months)
+ramadan_flag = build_ramadan_flag(all_months)
+
+# Build a complete exogenous DataFrame indexed by Month: columns: FleetHours, IsRamadan
+exog_full = pd.DataFrame(index=all_months)
+# 1) Populate FleetHours: reindex to all_months (fill missing with 0)
+if not fleet_hours.empty:
+    exog_full["FleetHours"] = fleet_hours.reindex(all_months, fill_value=0)
+else:
+    exog_full["FleetHours"] = 0.0
+
+# 2) Populate Ramadan indicator
+exog_full["IsRamadanMonth"] = ramadan_flag
+
+st.write("Here is a preview of the exogenous DataFrame (FleetHours + Ramadan flag):")
+st.dataframe(exog_full.head(12))
+
+# —————————————————————————————
+# 6) Pre-Fit Auto-ARIMA for Each Family (to get (p,d,q) × (P,D,Q,12))
+# —————————————————————————————
+
+st.write("### ▶️ Pre-fitting Auto-ARIMA on each Family (this may take a moment)…")
+family_params = {}  # { family: {"order":(p,d,q), "seasonal":(P,D,Q,12)} }
+
+for fam in family_ts.columns:
+    ts_fam = family_ts[fam].reindex(historical_months, fill_value=0)
+    # Skip families that have almost no data
+    if ts_fam.sum() < 1 or (ts_fam > 0).sum() < 3:
+        # fallback to default (1,1,1)x(1,1,1,12)
+        family_params[fam] = {
+            "order": (1, 1, 1),
+            "seasonal": (1, 1, 1, 12),
+        }
+        continue
+
+    try:
+        # We include Exogenous = FleetHours + Ramadan for the family fit as well
+        exog_fam = exog_full["FleetHours"].loc[historical_months].values.reshape(-1, 1)
+        # (Optional) You could also pass IsRamadanMonth as a second column:
+        exog_fam2 = np.vstack([
+            exog_full["IsRamadanMonth"].loc[historical_months].values,
+            exog_fam.flatten()
+        ]).T
+
+        fam_model = pm.auto_arima(
+            ts_fam,
+            exogenous=exog_fam2,
+            seasonal=True,
+            m=12,
+            start_p=0,
+            max_p=2,
+            start_q=0,
+            max_q=2,
+            start_P=0,
+            max_P=1,
+            start_Q=0,
+            max_Q=1,
+            d=None,
+            D=1,
+            trace=False,
+            error_action="ignore",
+            suppress_warnings=True,
+            stepwise=True,
+            n_jobs=1,
         )
-        st.success(
-            f"🔮 Prediction period: {forecast_start.strftime('%Y-%m')} → {forecast_end.strftime('%Y-%m')}"
-        )
+        family_params[fam] = {
+            "order": fam_model.order,
+            "seasonal": fam_model.seasonal_order,
+        }
+    except Exception as e:
+        # If auto_arima fails, fall back
+        family_params[fam] = {
+            "order": (1, 1, 1),
+            "seasonal": (1, 1, 1, 12),
+        }
 
-        # 7) Prepare progress bar
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+st.success("✅ Finished pre-fitting family-level SARIMA parameters.")
+st.write("Family parameters discovered:")
+fam_summary = pd.DataFrame.from_dict(
+    {fam: {"order": str(vals["order"]), "seasonal": str(vals["seasonal"])} 
+     for fam, vals in family_params.items()}, 
+    orient="index"
+)
+st.dataframe(fam_summary)
 
-        # 8) Loop over each unique part
-        results_data = []
-        parts_list = sorted(df_grouped["Part"].unique())
-        total_parts = len(parts_list)
+# —————————————————————————————
+# 7) Loop Over Each Part (SKU) to Forecast
+# —————————————————————————————
 
-        parts_with_sarima = 0
-        parts_with_naive = 0
-        parts_failed = 0
+progress_bar = st.progress(0.0)
+status_text = st.empty()
 
-        for idx, part in enumerate(parts_list):
-            progress_bar.progress((idx + 1) / total_parts)
-            status_text.text(f"Processing part {idx + 1}/{total_parts}: {part}")
+results_data = []
+parts_list = sorted(part_ts_df["Part"].unique())
+total_parts = len(parts_list)
 
+parts_with_sarima = 0
+parts_with_naive = 0
+parts_failed = 0
+
+# Precompute: number of parts per family (for allocation in fallbacks)
+n_parts_in_family = (
+    part_ts_df[["Part", "Family"]]
+    .drop_duplicates()
+    .groupby("Family")["Part"].nunique()
+    .to_dict()
+)
+
+for idx, part in enumerate(parts_list):
+    progress_bar.progress((idx + 1) / total_parts)
+    status_text.text(f"Processing part {idx + 1}/{total_parts}: {part}")
+
+    try:
+        # Extract raw series for this part
+        sub = part_ts_df[part_ts_df["Part"] == part][["Month", "Sales", "Family"]]
+        fam = sub["Family"].iloc[0]
+        raw = sub.set_index("Month")[["Sales"]].sort_index()
+        raw = raw.reindex(historical_months, fill_value=0)  # zero-fill missing months
+
+        # 1) Determine “active” start (first non-zero)
+        if (raw["Sales"] > 0).any():
+            start_nonzero = raw[raw["Sales"] > 0].index.min()
+            ts = raw.loc[start_nonzero:][ "Sales" ].copy()
+        else:
+            ts = raw["Sales"].copy()
+
+        # If not enough history or non-zeros, fallback to Family average
+        non_zero_count = (ts > 0).sum()
+        if (len(ts) < 12) or (non_zero_count < 3):
+            # Use family’s last 3 months total, then divide equally among SKUs
+            fam_hist = family_ts[fam].reindex(historical_months, fill_value=0)
+            last3_total = fam_hist.iloc[-3:].sum()
+            fallback_per_sku = int(round(last3_total / max(n_parts_in_family[fam], 1), 0))
+            fc_vals = [fallback_per_sku] * 12
+            method_used = "Naive (family avg)"
+            parts_with_naive += 1
+        else:
+            # 2) Box–Cox transform (add tiny constant to avoid zeros)
+            ts_pos = ts + 1e-6
+            ts_bc, λ = boxcox(ts_pos)
+
+            # 3) Use pre-fitted family params
+            fam_order = family_params[fam]["order"]
+            fam_seasonal = family_params[fam]["seasonal"]
+
+            # 4) Build exogenous matrix for “in-sample” (ensuring alignment)
+            exog_insample = exog_full.loc[ts.index, ["FleetHours", "IsRamadanMonth"]].values
+
+            # 5) Fit SARIMAX on transformed series
             try:
-                # Extract each part’s monthly series, indexed by Month
-                raw = (
-                    df_grouped[df_grouped["Part"] == part]
-                    .loc[:, ["Month", "Sales"]]
-                    .set_index("Month")
-                    .sort_index()
-                )
+                model = SARIMAX(
+                    ts_bc,
+                    exog=exog_insample,
+                    order=fam_order,
+                    seasonal_order=fam_seasonal,
+                    enforce_stationarity=False,
+                    enforce_invertibility=False,
+                ).fit(disp=False)
 
-                if len(raw) == 0:
-                    st.warning(f"No data found for part: {part}")
-                    parts_failed += 1
-                    continue
+                # 6) Forecast next 12 months with exog
+                exog_out = exog_full.loc[forecast_months, ["FleetHours", "IsRamadanMonth"]].values
+                bc_forecast = model.get_forecast(steps=12, exog=exog_out).predicted_mean
+                preds = inv_boxcox(bc_forecast, λ).round().astype(int)
+                preds = np.clip(preds, 0, None)  # no negative forecasts
 
-                # Build a continuous monthly index from first sale to max_date
-                part_index = pd.date_range(start=raw.index.min(), end=max_date, freq="MS")
-                part_train = (
-                    raw.reindex(part_index, fill_value=0)
-                    .reset_index()
-                    .rename(columns={"index": "ds", "Sales": "y"})
-                )
-
-                # Create a full‐history snapshot (for storing “historical” columns later)
-                part_full_hist = (
-                    raw.reindex(historical_months, fill_value=0)
-                    .reset_index()
-                    .rename(columns={"index": "Month", "Sales": "Sales"})
-                )
-
-                row_data = {"Item Code": part}
-                for hist_month in historical_months:
-                    sales_val = part_full_hist.loc[
-                        part_full_hist["Month"] == hist_month, "Sales"
-                    ]
-                    row_data[hist_month.strftime("%b-%Y")] = int(sales_val.iloc[0]) if len(sales_val) > 0 else 0
-
-                # 8.a) If too few data points (<12 months) or too few nonzero months, use naive 3-month avg
-                non_zero_count = (part_train["y"] > 0).sum()
-                if (len(part_train) < 12) or (non_zero_count < 2):
-                    last_three = part_train.sort_values("ds").tail(3)["y"]
-                    naive_forecast = int(round(last_three.mean(), 0)) if len(last_three) > 0 else 0
-                    for fc_month in forecast_months:
-                        row_data[fc_month.strftime("%b-%Y")] = naive_forecast
-
-                    row_data["Method"] = "Naive"
-                    results_data.append(row_data)
-                    parts_with_naive += 1
-                    continue
-
-                # 8.b) Fit SARIMA on the datetime-indexed series
-                try:
-                    ts = part_train.set_index("ds")["y"]  # Series with a datetime index
-
-                    # Fit a standard (1,1,1)x(1,1,1,12) SARIMA
-                    model = SARIMAX(
-                        ts,
-                        order=(1, 1, 1),
-                        seasonal_order=(1, 1, 1, 12),
-                        enforce_stationarity=False,
-                        enforce_invertibility=False,
-                    ).fit(disp=False)
-
-                    # Forecast next 12 months
-                    forecast_res = model.get_forecast(steps=12)
-                    preds = forecast_res.predicted_mean.round().astype(int)
-
-                    for i, fc_month in enumerate(forecast_months):
-                        yhat = preds.iloc[i]
-                        # Clip negative predictions to zero
-                        row_data[fc_month.strftime("%b-%Y")] = max(0, int(yhat))
-
-                    row_data["Method"] = "SARIMA"
-                    results_data.append(row_data)
-                    parts_with_sarima += 1
-
-                except Exception as e:
-                    # If SARIMA fails for some numeric reason, fall back to naive
-                    st.warning(f"SARIMA failed for part {part}: {str(e)}. Using naive forecast.")
-                    last_three = part_train.sort_values("ds").tail(3)["y"]
-                    naive_forecast = int(round(last_three.mean(), 0)) if len(last_three) > 0 else 0
-                    for fc_month in forecast_months:
-                        row_data[fc_month.strftime("%b-%Y")] = naive_forecast
-                    row_data["Method"] = "Naive (SARIMA failed)"
-                    results_data.append(row_data)
-                    parts_with_naive += 1
+                fc_vals = preds.tolist()
+                method_used = f"SARIMA (fam={fam})"
+                parts_with_sarima += 1
 
             except Exception as e:
-                st.error(f"Error processing part {part}: {str(e)}")
-                parts_failed += 1
-                continue
+                # Fallback if SARIMAX blew up
+                fam_hist = family_ts[fam].reindex(historical_months, fill_value=0)
+                last6 = fam_hist.iloc[-6:].mean()
+                fallback2 = int(round(last6 / max(n_parts_in_family[fam], 1), 0))
+                fc_vals = [fallback2] * 12
+                method_used = "Naive (SARIMAX failed)"
+                parts_with_naive += 1
 
-        progress_bar.empty()
-        status_text.empty()
+        # 7) Build output row: historical + forecast columns
+        row_data = {"Item Code": part}
+        # Historical (all months)
+        for hist_m in historical_months:
+            row_data[hist_m.strftime("%b-%Y")] = int(raw.loc[hist_m, "Sales"])
 
-        # 9) Create final DataFrame
-        result_df = pd.DataFrame(results_data)
+        # Forecast months
+        for i, fc_m in enumerate(forecast_months):
+            row_data[fc_m.strftime("%b-%Y")] = int(fc_vals[i])
 
-        # Show processing summary
-        st.write("### 📊 Processing Summary")
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Total Parts", total_parts)
-        with col2:
-            st.metric("SARIMA Models", parts_with_sarima)
-        with col3:
-            st.metric("Naive Forecasts", parts_with_naive)
-        with col4:
-            st.metric("Failed", parts_failed)
-
-        # 10) Reorder columns: Item Code → all months (historical + forecast) → Method
-        month_columns = [m.strftime("%b-%Y") for m in list(historical_months) + list(forecast_months)]
-        ordered_cols = ["Item Code"] + [c for c in month_columns if c in result_df.columns]
-        final_cols = ordered_cols + ["Method"]
-        result_df = result_df[final_cols]
-
-        st.success("✅ Forecasting completed!")
-        st.write(f"🔢 Number of parts processed: {len(result_df)}")
-
-        # 11) Show a quick preview
-        st.write("**Forecast sample (first 10 parts):**")
-        preview_cols = (
-            ["Item Code"] 
-            + month_columns[-3:]  # last 3 historical months
-            + [m.strftime("%b-%Y") for m in forecast_months[:3]]  # first 3 forecast months
-            + ["Method"]
-        )
-        preview_cols = [c for c in preview_cols if c in result_df.columns]
-        st.dataframe(result_df[preview_cols].head(10))
-
-        # 12) Prepare Excel download
-        excel_df = result_df.loc[:, ["Item Code"] + month_columns].fillna("")
-
-        # Build two-row header: month names + “Historical QTY”/“Forecasted QTY”
-        header_row_1 = ["Item Code"]
-        header_row_2 = [""]
-        for col in month_columns:
-            header_row_1.append(col)
-            dt = pd.to_datetime(col, format="%b-%Y", errors="coerce")
-            if pd.isna(dt) or (dt <= max_date):
-                header_row_2.append("Historical QTY")
-            else:
-                header_row_2.append("Forecasted QTY")
-
-        restructured_data = [header_row_1, header_row_2]
-        for _, row in excel_df.iterrows():
-            restructured_data.append(row.tolist())
-
-        max_cols = max(len(r) for r in restructured_data)
-        for r in restructured_data:
-            while len(r) < max_cols:
-                r.append("")
-
-        restructured_df = pd.DataFrame(restructured_data)
-
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            restructured_df.to_excel(writer, sheet_name="Sales Forecast", index=False, header=False)
-            workbook = writer.book
-            worksheet = writer.sheets["Sales Forecast"]
-
-            month_header_format = workbook.add_format(
-                {
-                    "bold": True,
-                    "text_wrap": True,
-                    "valign": "top",
-                    "align": "center",
-                    "fg_color": "#D7E4BC",
-                    "border": 1,
-                }
-            )
-            dtype_header_format = workbook.add_format(
-                {
-                    "bold": True,
-                    "text_wrap": True,
-                    "valign": "top",
-                    "align": "center",
-                    "fg_color": "#F2F2F2",
-                    "border": 1,
-                    "font_size": 9,
-                }
-            )
-            item_code_format = workbook.add_format(
-                {
-                    "bold": True,
-                    "fg_color": "#F2F2F2",
-                    "border": 1,
-                    "align": "left",
-                }
-            )
-            hist_format = workbook.add_format(
-                {
-                    "fg_color": "#E8F4FD",
-                    "border": 1,
-                    "align": "right",
-                    "num_format": "#,##0",
-                }
-            )
-            fc_format = workbook.add_format(
-                {
-                    "fg_color": "#FFF2CC",
-                    "border": 1,
-                    "align": "right",
-                    "num_format": "#,##0",
-                }
-            )
-
-            for col_num, val in enumerate(header_row_1):
-                worksheet.write(0, col_num, val, month_header_format)
-            for col_num, val in enumerate(header_row_2):
-                worksheet.write(1, col_num, val, dtype_header_format)
-
-            for row_num, data_row in enumerate(restructured_data[2:], start=2):
-                for col_num, cell in enumerate(data_row):
-                    if col_num == 0:
-                        worksheet.write(row_num, col_num, cell, item_code_format)
-                    else:
-                        col_name = header_row_1[col_num]
-                        try:
-                            dt = pd.to_datetime(col_name, format="%b-%Y", errors="coerce")
-                            if pd.isna(dt) or (dt <= max_date):
-                                worksheet.write(row_num, col_num, cell, hist_format)
-                            else:
-                                worksheet.write(row_num, col_num, cell, fc_format)
-                        except:
-                            worksheet.write(row_num, col_num, cell, fc_format)
-
-            worksheet.set_column(0, 0, 20)
-            for col_num in range(1, max_cols):
-                worksheet.set_column(col_num, col_num, 14)
-            worksheet.freeze_panes(2, 1)
-
-        output.seek(0)
-        st.download_button(
-            label="📥 Download Excel (SARIMA Forecast)",
-            data=output,
-            file_name="Parts_Forecast_SARIMA.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        row_data["Method"] = method_used
+        results_data.append(row_data)
 
     except Exception as e:
-        st.error(f"Error processing file: {e}")
-        st.write("Please verify the uploaded Excel has the correct columns (Part, Month, Sales).")
-        import traceback
-        st.write("Full error trace:")
-        st.code(traceback.format_exc())
+        st.warning(f"⚠️ Skipping part {part} due to error: {e}")
+        parts_failed += 1
+        continue
+
+progress_bar.empty()
+status_text.empty()
+
+# —————————————————————————————
+# 8) Summarize & Build Final DataFrame
+# —————————————————————————————
+
+st.write("### 📊 Processing Summary")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Total Parts", total_parts)
+c2.metric("SARIMA Models", parts_with_sarima)
+c3.metric("Naive Forecasts", parts_with_naive)
+c4.metric("Failed", parts_failed)
+
+result_df = pd.DataFrame(results_data)
+
+# Reorder columns: Item Code → all months (hist + forecast) → Method
+all_month_cols = [m.strftime("%b-%Y") for m in list(historical_months) + list(forecast_months)]
+ordered_cols = ["Item Code"] + [c for c in all_month_cols if c in result_df.columns]
+final_cols = ordered_cols + ["Method"]
+result_df = result_df[final_cols].copy()
+
+st.success("✅ Forecasting Completed!")
+st.write(f"🔢 Parts processed: {len(result_df)}")
+
+# Show a quick preview (last 3 historical + first 3 forecast)
+preview_cols = (
+    ["Item Code"]
+    + all_month_cols[-3:]
+    + [m.strftime("%b-%Y") for m in forecast_months[:3]]
+    + ["Method"]
+)
+preview_cols = [c for c in preview_cols if c in result_df.columns]
+st.write("**Forecast Sample (first 10 SKUs)**")
+st.dataframe(result_df[preview_cols].head(10))
+
+# —————————————————————————————
+# 9) Download as Excel (with two-row headers)
+# —————————————————————————————
+
+excel_df = result_df[["Item Code"] + all_month_cols].fillna("")
+
+# Build header rows
+hdr1 = ["Item Code"]
+hdr2 = [""]
+for col in all_month_cols:
+    hdr1.append(col)
+    dt = pd.to_datetime(col, format="%b-%Y", errors="coerce")
+    if pd.isna(dt) or (dt <= max_date):
+        hdr2.append("Historical QTY")
+    else:
+        hdr2.append("Forecasted QTY")
+
+two_row = [hdr1, hdr2]
+for _, row in excel_df.iterrows():
+    two_row.append(row.tolist())
+
+# Pad rows to equal length
+max_c = max(len(r) for r in two_row)
+for r in two_row:
+    while len(r) < max_c:
+        r.append("")
+
+hdr_df = pd.DataFrame(two_row)
+
+output = io.BytesIO()
+with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+    hdr_df.to_excel(writer, sheet_name="MH_Sales_Forecast", index=False, header=False)
+    wb = writer.book
+    ws = writer.sheets["MH_Sales_Forecast"]
+
+    fmt_month = wb.add_format(
+        {
+            "bold": True,
+            "text_wrap": True,
+            "valign": "top",
+            "align": "center",
+            "fg_color": "#D7E4BC",
+            "border": 1,
+        }
+    )
+    fmt_type = wb.add_format(
+        {
+            "bold": True,
+            "text_wrap": True,
+            "valign": "top",
+            "align": "center",
+            "fg_color": "#F2F2F2",
+            "border": 1,
+            "font_size": 9,
+        }
+    )
+    fmt_item = wb.add_format(
+        {
+            "bold": True,
+            "fg_color": "#F2F2F2",
+            "border": 1,
+            "align": "left",
+        }
+    )
+    fmt_hist = wb.add_format(
+        {
+            "fg_color": "#E8F4FD",
+            "border": 1,
+            "align": "right",
+            "num_format": "#,##0",
+        }
+    )
+    fmt_fc = wb.add_format(
+        {
+            "fg_color": "#FFF2CC",
+            "border": 1,
+            "align": "right",
+            "num_format": "#,##0",
+        }
+    )
+
+    # Write headers
+    for col_idx, val in enumerate(hdr1):
+        ws.write(0, col_idx, val, fmt_month)
+    for col_idx, val in enumerate(hdr2):
+        ws.write(1, col_idx, val, fmt_type)
+
+    # Write data rows
+    for r_idx, row in enumerate(two_row[2:], start=2):
+        for c_idx, cell in enumerate(row):
+            if c_idx == 0:
+                ws.write(r_idx, c_idx, cell, fmt_item)
+            else:
+                colname = hdr1[c_idx]
+                dt = pd.to_datetime(colname, format="%b-%Y", errors="coerce")
+                if pd.isna(dt) or (dt <= max_date):
+                    ws.write(r_idx, c_idx, cell, fmt_hist)
+                else:
+                    ws.write(r_idx, c_idx, cell, fmt_fc)
+
+    ws.set_column(0, 0, 20)
+    for c in range(1, max_c):
+        ws.set_column(c, c, 14)
+    ws.freeze_panes(2, 1)
+
+output.seek(0)
+st.download_button(
+    label="📥 Download Excel (MH Family SARIMA Forecast)",
+    data=output,
+    file_name="MH_Parts_Forecast.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
