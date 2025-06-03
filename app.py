@@ -423,57 +423,297 @@ def forecast_xgboost(model, last_12_series, n_periods):
         return None
 
 
-def create_excel_report(result_df, hist_df, actual_2024_df, forecast_year):
+def create_model_comparison_diagram(result_df, forecast_year):
     """
-    Create a comprehensive Excel report with multiple sheets.
+    Create a comprehensive comparison diagram showing actual vs all models.
+    """
+    if f'Actual_{forecast_year}' not in result_df.columns or result_df[f'Actual_{forecast_year}'].isna().all():
+        return None
+    
+    # Prepare data
+    comparison_data = result_df.copy()
+    comparison_data['Month_Name'] = pd.to_datetime(comparison_data['Month']).dt.strftime('%b %Y')
+    
+    # Get model columns
+    model_cols = [col for col in result_df.columns if '_Forecast' in col]
+    actual_col = f'Actual_{forecast_year}'
+    
+    # Create subplots: one main comparison and individual model comparisons
+    n_models = len(model_cols)
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=[
+            '📊 All Models vs Actual Comparison',
+            '🎯 Actual vs Ensemble Forecast',
+            '📈 Model Performance by Month',
+            '🔍 Accuracy Distribution'
+        ],
+        specs=[
+            [{"colspan": 2}, None],
+            [{"type": "scatter"}, {"type": "bar"}]
+        ],
+        vertical_spacing=0.12,
+        horizontal_spacing=0.1
+    )
+    
+    # Colors for different models
+    colors = {
+        'Actual': '#1f77b4',  # Blue
+        'SARIMA': '#ff7f0e',  # Orange  
+        'Prophet': '#2ca02c', # Green
+        'ETS': '#d62728',     # Red
+        'XGB': '#9467bd',     # Purple
+        'Ensemble': '#8c564b' # Brown
+    }
+    
+    # Plot 1: All models comparison (top row, full width)
+    fig.add_trace(go.Scatter(
+        x=comparison_data['Month_Name'],
+        y=comparison_data[actual_col],
+        mode='lines+markers',
+        name='Actual',
+        line=dict(color=colors['Actual'], width=4),
+        marker=dict(size=10, symbol='circle'),
+        legendgroup='main'
+    ), row=1, col=1)
+    
+    for col in model_cols:
+        model_name = col.replace('_Forecast', '')
+        fig.add_trace(go.Scatter(
+            x=comparison_data['Month_Name'],
+            y=comparison_data[col],
+            mode='lines+markers',
+            name=model_name,
+            line=dict(color=colors.get(model_name, '#17becf'), width=2),
+            marker=dict(size=6),
+            legendgroup='main'
+        ), row=1, col=1)
+    
+    # Plot 2: Actual vs Ensemble (bottom left)
+    if 'Ensemble_Forecast' in comparison_data.columns:
+        # Scatter plot for correlation
+        fig.add_trace(go.Scatter(
+            x=comparison_data[actual_col],
+            y=comparison_data['Ensemble_Forecast'],
+            mode='markers',
+            name='Actual vs Ensemble',
+            marker=dict(
+                size=12,
+                color=comparison_data.index,
+                colorscale='Viridis',
+                showscale=True,
+                colorbar=dict(title="Month")
+            ),
+            text=comparison_data['Month_Name'],
+            textposition="top center",
+            showlegend=False
+        ), row=2, col=1)
+        
+        # Add perfect prediction line
+        min_val = min(comparison_data[actual_col].min(), comparison_data['Ensemble_Forecast'].min())
+        max_val = max(comparison_data[actual_col].max(), comparison_data['Ensemble_Forecast'].max())
+        fig.add_trace(go.Scatter(
+            x=[min_val, max_val],
+            y=[min_val, max_val],
+            mode='lines',
+            name='Perfect Prediction',
+            line=dict(color='red', width=2, dash='dash'),
+            showlegend=False
+        ), row=2, col=1)
+    
+    # Plot 3: Model accuracy by month (bottom right)
+    accuracy_data = []
+    for _, row in comparison_data.iterrows():
+        for col in model_cols:
+            if pd.notna(row[actual_col]) and pd.notna(row[col]):
+                error = abs(row[actual_col] - row[col]) / row[actual_col] * 100
+                accuracy_data.append({
+                    'Month': row['Month_Name'],
+                    'Model': col.replace('_Forecast', ''),
+                    'MAPE': error
+                })
+    
+    if accuracy_data:
+        acc_df = pd.DataFrame(accuracy_data)
+        for model in acc_df['Model'].unique():
+            model_data = acc_df[acc_df['Model'] == model]
+            fig.add_trace(go.Bar(
+                x=model_data['Month'],
+                y=model_data['MAPE'],
+                name=f'{model} MAPE',
+                marker_color=colors.get(model, '#17becf'),
+                showlegend=False,
+                opacity=0.7
+            ), row=2, col=2)
+    
+    # Update layout
+    fig.update_layout(
+        height=800,
+        title_text="🔄 Comprehensive Model Comparison Dashboard",
+        title_x=0.5,
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5
+        )
+    )
+    
+    # Update axes labels
+    fig.update_xaxes(title_text="Month", row=1, col=1)
+    fig.update_yaxes(title_text="Sales Volume", row=1, col=1)
+    fig.update_xaxes(title_text="Actual Sales", row=2, col=1)
+    fig.update_yaxes(title_text="Predicted Sales", row=2, col=1)
+    fig.update_xaxes(title_text="Month", row=2, col=2)
+    fig.update_yaxes(title_text="MAPE (%)", row=2, col=2)
+    
+    return fig
+
+
+def create_detailed_excel_report(result_df, hist_df, actual_2024_df, forecast_year):
+    """
+    Create a detailed Excel report with comprehensive model comparisons.
     """
     output = io.BytesIO()
     
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # Sheet 1: Main Results
-        result_df.to_excel(writer, sheet_name='Forecast_vs_Actual', index=False)
+        # Sheet 1: Main Results with all models
+        result_df.to_excel(writer, sheet_name='All_Models_Comparison', index=False)
         
-        # Sheet 2: Historical Data
-        if hist_df is not None:
-            hist_summary = hist_df.groupby(hist_df['Month'].dt.year)['Sales'].agg([
-                'sum', 'mean', 'min', 'max', 'count'
-            ]).reset_index()
-            hist_summary.columns = ['Year', 'Total_Sales', 'Avg_Monthly', 'Min_Monthly', 'Max_Monthly', 'Months_Count']
-            hist_summary.to_excel(writer, sheet_name='Historical_Summary', index=False)
-            
-            # Monthly historical data
-            hist_df.to_excel(writer, sheet_name='Historical_Data', index=False)
-        
-        # Sheet 3: Actual 2024 Data (if available)
-        if actual_2024_df is not None:
-            actual_2024_df.to_excel(writer, sheet_name='Actual_2024_Data', index=False)
-        
-        # Sheet 4: Model Performance Summary
+        # Sheet 2: Model vs Actual Detailed Comparison
         if f'Actual_{forecast_year}' in result_df.columns and not result_df[f'Actual_{forecast_year}'].isna().all():
-            performance_data = []
             model_cols = [col for col in result_df.columns if '_Forecast' in col]
+            actual_col = f'Actual_{forecast_year}'
             
+            # Create detailed comparison table
+            comparison_df = result_df[['Month', actual_col] + model_cols].copy()
+            
+            # Add variance columns for each model
             for col in model_cols:
-                metrics = calculate_accuracy_metrics(result_df[f'Actual_{forecast_year}'], result_df[col])
+                model_name = col.replace('_Forecast', '')
+                comparison_df[f'{model_name}_Variance'] = comparison_df[col] - comparison_df[actual_col]
+                comparison_df[f'{model_name}_Abs_Error'] = abs(comparison_df[col] - comparison_df[actual_col])
+                comparison_df[f'{model_name}_MAPE'] = (abs(comparison_df[col] - comparison_df[actual_col]) / comparison_df[actual_col] * 100).round(2)
+            
+            comparison_df.to_excel(writer, sheet_name='Model_vs_Actual_Detail', index=False)
+        
+        # Sheet 3: Monthly Performance Summary
+        if f'Actual_{forecast_year}' in result_df.columns and not result_df[f'Actual_{forecast_year}'].isna().all():
+            monthly_summary = []
+            for _, row in result_df.iterrows():
+                month_data = {
+                    'Month': row['Month'],
+                    'Actual': row[actual_col] if pd.notna(row[actual_col]) else 'N/A'
+                }
+                
+                for col in model_cols:
+                    model_name = col.replace('_Forecast', '')
+                    forecast_val = row[col]
+                    month_data[f'{model_name}_Forecast'] = forecast_val
+                    
+                    if pd.notna(row[actual_col]) and pd.notna(forecast_val):
+                        error = abs(row[actual_col] - forecast_val)
+                        pct_error = (error / row[actual_col]) * 100
+                        month_data[f'{model_name}_Error'] = round(error, 2)
+                        month_data[f'{model_name}_Error_Pct'] = round(pct_error, 2)
+                    else:
+                        month_data[f'{model_name}_Error'] = 'N/A'
+                        month_data[f'{model_name}_Error_Pct'] = 'N/A'
+                
+                monthly_summary.append(month_data)
+            
+            monthly_df = pd.DataFrame(monthly_summary)
+            monthly_df.to_excel(writer, sheet_name='Monthly_Performance', index=False)
+        
+        # Sheet 4: Model Ranking and Statistics
+        if f'Actual_{forecast_year}' in result_df.columns and not result_df[f'Actual_{forecast_year}'].isna().all():
+            ranking_data = []
+            for col in model_cols:
+                metrics = calculate_accuracy_metrics(result_df[actual_col], result_df[col])
                 if metrics:
-                    performance_data.append({
+                    total_forecast = result_df[col].sum()
+                    total_actual = result_df[actual_col].sum()
+                    bias = ((total_forecast - total_actual) / total_actual * 100) if total_actual > 0 else 0
+                    
+                    ranking_data.append({
                         'Model': col.replace('_Forecast', ''),
                         'MAPE': round(metrics['MAPE'], 2),
                         'MAE': round(metrics['MAE'], 0),
                         'RMSE': round(metrics['RMSE'], 0),
-                        'Total_Forecast': result_df[col].sum(),
-                        'Total_Actual': result_df[f'Actual_{forecast_year}'].sum()
+                        'Total_Forecast': round(total_forecast, 0),
+                        'Total_Actual': round(total_actual, 0),
+                        'Bias_Pct': round(bias, 2),
+                        'Avg_Monthly_Forecast': round(result_df[col].mean(), 0),
+                        'Std_Monthly_Forecast': round(result_df[col].std(), 0)
                     })
             
-            if performance_data:
-                performance_df = pd.DataFrame(performance_data)
-                performance_df.to_excel(writer, sheet_name='Model_Performance', index=False)
+            if ranking_data:
+                ranking_df = pd.DataFrame(ranking_data)
+                # Sort by MAPE (best to worst)
+                ranking_df = ranking_df.sort_values('MAPE')
+                ranking_df['Rank'] = range(1, len(ranking_df) + 1)
+                ranking_df = ranking_df[['Rank'] + [col for col in ranking_df.columns if col != 'Rank']]
+                ranking_df.to_excel(writer, sheet_name='Model_Rankings', index=False)
         
-        # Sheet 5: Monthly Analysis
-        monthly_analysis = result_df.copy()
-        monthly_analysis['Month_Name'] = pd.to_datetime(monthly_analysis['Month']).dt.strftime('%B')
-        monthly_analysis['Quarter'] = pd.to_datetime(monthly_analysis['Month']).dt.quarter
-        monthly_analysis.to_excel(writer, sheet_name='Monthly_Analysis', index=False)
+        # Sheet 5: Historical Analysis
+        if hist_df is not None:
+            hist_analysis = hist_df.copy()
+            hist_analysis['Year'] = hist_analysis['Month'].dt.year
+            hist_analysis['Month_Name'] = hist_analysis['Month'].dt.strftime('%B')
+            hist_analysis['Quarter'] = hist_analysis['Month'].dt.quarter
+            
+            # Yearly summary
+            yearly_summary = hist_analysis.groupby('Year')['Sales'].agg([
+                'sum', 'mean', 'std', 'min', 'max', 'count'
+            ]).round(2).reset_index()
+            yearly_summary.columns = ['Year', 'Total_Sales', 'Avg_Monthly', 'Std_Dev', 'Min_Monthly', 'Max_Monthly', 'Months_Count']
+            
+            # Calculate year-over-year growth
+            yearly_summary['YoY_Growth_Pct'] = yearly_summary['Total_Sales'].pct_change() * 100
+            yearly_summary['YoY_Growth_Pct'] = yearly_summary['YoY_Growth_Pct'].round(2)
+            
+            yearly_summary.to_excel(writer, sheet_name='Historical_Analysis', index=False)
+            
+            # Monthly historical data
+            hist_analysis.to_excel(writer, sheet_name='Historical_Data_Detail', index=False)
+        
+        # Sheet 6: Executive Summary
+        summary_data = []
+        
+        # Overall forecast summary
+        forecast_summary = {
+            'Metric': 'Total Forecast (Ensemble)',
+            'Value': result_df['Ensemble_Forecast'].sum() if 'Ensemble_Forecast' in result_df.columns else 'N/A',
+            'Description': 'Sum of all 12 months ensemble forecast'
+        }
+        summary_data.append(forecast_summary)
+        
+        if f'Actual_{forecast_year}' in result_df.columns and not result_df[f'Actual_{forecast_year}'].isna().all():
+            actual_total = result_df[actual_col].sum()
+            ensemble_total = result_df['Ensemble_Forecast'].sum() if 'Ensemble_Forecast' in result_df.columns else 0
+            
+            summary_data.extend([
+                {
+                    'Metric': f'Total Actual {forecast_year}',
+                    'Value': actual_total,
+                    'Description': f'Sum of actual sales for {forecast_year}'
+                },
+                {
+                    'Metric': 'Forecast Accuracy (Ensemble)',
+                    'Value': f"{((1 - abs(ensemble_total - actual_total) / actual_total) * 100):.1f}%" if actual_total > 0 else 'N/A',
+                    'Description': 'Overall forecast accuracy percentage'
+                },
+                {
+                    'Metric': 'Best Performing Model',
+                    'Value': ranking_df.iloc[0]['Model'] if 'ranking_df' in locals() and not ranking_df.empty else 'N/A',
+                    'Description': 'Model with lowest MAPE'
+                }
+            ])
+        
+        summary_df = pd.DataFrame(summary_data)
+        summary_df.to_excel(writer, sheet_name='Executive_Summary', index=False)
     
     output.seek(0)
     return output
