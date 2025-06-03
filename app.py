@@ -2,10 +2,19 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import io
-import xlsxwriter
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 import warnings
 warnings.filterwarnings('ignore')
+
+# Try to import xlsxwriter, fall back to openpyxl if not available
+try:
+    import xlsxwriter
+    EXCEL_ENGINE = "xlsxwriter"
+    XLSXWRITER_AVAILABLE = True
+except ImportError:
+    EXCEL_ENGINE = "openpyxl"
+    XLSXWRITER_AVAILABLE = False
+    st.warning("⚠️ xlsxwriter not available. Using openpyxl for Excel export (limited formatting).")
 
 st.set_page_config(layout="wide", page_title="Spare Parts Forecast", page_icon="📈")
 st.title("📈 Spare Parts Forecast (MH-Family SARIMA with Log Transform)")
@@ -514,7 +523,7 @@ if not forecast_data.empty:
     st.dataframe(summary_stats)
 
 # —————————————————————————————
-# 9) Download as Excel (two-row header)
+# 9) Download as Excel (compatible with both engines)
 # —————————————————————————————
 
 try:
@@ -543,97 +552,147 @@ try:
     restructured_df = pd.DataFrame(restructured_data)
 
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        restructured_df.to_excel(writer, sheet_name="MH_Sales_Forecast", index=False, header=False)
-        workbook = writer.book
-        worksheet = writer.sheets["MH_Sales_Forecast"]
+    
+    if XLSXWRITER_AVAILABLE:
+        # Use xlsxwriter for advanced formatting
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            restructured_df.to_excel(writer, sheet_name="MH_Sales_Forecast", index=False, header=False)
+            workbook = writer.book
+            worksheet = writer.sheets["MH_Sales_Forecast"]
 
-        # Enhanced formatting
-        fmt_month = workbook.add_format(
-            {
-                "bold": True,
-                "text_wrap": True,
-                "valign": "top",
-                "align": "center",
-                "fg_color": "#D7E4BC",
-                "border": 1,
-                "font_size": 10,
-            }
-        )
-        fmt_type = workbook.add_format(
-            {
-                "bold": True,
-                "text_wrap": True,
-                "valign": "top",
-                "align": "center",
-                "fg_color": "#F2F2F2",
-                "border": 1,
-                "font_size": 9,
-            }
-        )
-        fmt_item = workbook.add_format(
-            {
-                "bold": True,
-                "fg_color": "#F2F2F2",
-                "border": 1,
-                "align": "left",
-                "font_size": 10,
-            }
-        )
-        fmt_hist = workbook.add_format(
-            {
-                "fg_color": "#E8F4FD",
-                "border": 1,
-                "align": "right",
-                "num_format": "#,##0",
-            }
-        )
-        fmt_fc = workbook.add_format(
-            {
-                "fg_color": "#FFF2CC",
-                "border": 1,
-                "align": "right",
-                "num_format": "#,##0",
-            }
-        )
+            # Enhanced formatting
+            fmt_month = workbook.add_format(
+                {
+                    "bold": True,
+                    "text_wrap": True,
+                    "valign": "top",
+                    "align": "center",
+                    "fg_color": "#D7E4BC",
+                    "border": 1,
+                    "font_size": 10,
+                }
+            )
+            fmt_type = workbook.add_format(
+                {
+                    "bold": True,
+                    "text_wrap": True,
+                    "valign": "top",
+                    "align": "center",
+                    "fg_color": "#F2F2F2",
+                    "border": 1,
+                    "font_size": 9,
+                }
+            )
+            fmt_item = workbook.add_format(
+                {
+                    "bold": True,
+                    "fg_color": "#F2F2F2",
+                    "border": 1,
+                    "align": "left",
+                    "font_size": 10,
+                }
+            )
+            fmt_hist = workbook.add_format(
+                {
+                    "fg_color": "#E8F4FD",
+                    "border": 1,
+                    "align": "right",
+                    "num_format": "#,##0",
+                }
+            )
+            fmt_fc = workbook.add_format(
+                {
+                    "fg_color": "#FFF2CC",
+                    "border": 1,
+                    "align": "right",
+                    "num_format": "#,##0",
+                }
+            )
 
-        # Write headers
-        for col_num, val in enumerate(header_row_1):
-            worksheet.write(0, col_num, val, fmt_month)
-        for col_num, val in enumerate(header_row_2):
-            worksheet.write(1, col_num, val, fmt_type)
+            # Write headers
+            for col_num, val in enumerate(header_row_1):
+                worksheet.write(0, col_num, val, fmt_month)
+            for col_num, val in enumerate(header_row_2):
+                worksheet.write(1, col_num, val, fmt_type)
 
-        # Write data rows
-        for row_num, data_row in enumerate(restructured_data[2:], start=2):
-            for col_num, cell in enumerate(data_row):
-                if col_num == 0:
-                    worksheet.write(row_num, col_num, cell, fmt_item)
-                else:
-                    col_name = header_row_1[col_num] if col_num < len(header_row_1) else ""
-                    try:
-                        dt = pd.to_datetime(col_name, format="%b-%Y", errors="coerce")
-                        if pd.isna(dt) or (dt <= max_date):
-                            worksheet.write(row_num, col_num, cell, fmt_hist)
-                        else:
+            # Write data rows
+            for row_num, data_row in enumerate(restructured_data[2:], start=2):
+                for col_num, cell in enumerate(data_row):
+                    if col_num == 0:
+                        worksheet.write(row_num, col_num, cell, fmt_item)
+                    else:
+                        col_name = header_row_1[col_num] if col_num < len(header_row_1) else ""
+                        try:
+                            dt = pd.to_datetime(col_name, format="%b-%Y", errors="coerce")
+                            if pd.isna(dt) or (dt <= max_date):
+                                worksheet.write(row_num, col_num, cell, fmt_hist)
+                            else:
+                                worksheet.write(row_num, col_num, cell, fmt_fc)
+                        except:
                             worksheet.write(row_num, col_num, cell, fmt_fc)
-                    except:
-                        worksheet.write(row_num, col_num, cell, fmt_fc)
 
-        # Adjust column widths
-        worksheet.set_column(0, 0, 20)  # Item Code column
-        for c in range(1, max_cols):
-            worksheet.set_column(c, c, 12)  # Date columns
-        
-        # Freeze panes for better navigation
-        worksheet.freeze_panes(2, 1)
+            # Adjust column widths
+            worksheet.set_column(0, 0, 20)  # Item Code column
+            for c in range(1, max_cols):
+                worksheet.set_column(c, c, 12)  # Date columns
+            
+            # Freeze panes for better navigation
+            worksheet.freeze_panes(2, 1)
+    
+    else:
+        # Use openpyxl for basic functionality
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            restructured_df.to_excel(writer, sheet_name="MH_Sales_Forecast", index=False, header=False)
+            
+            # Basic formatting with openpyxl
+            try:
+                from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+                
+                worksheet = writer.sheets["MH_Sales_Forecast"]
+                
+                # Define styles
+                header_font = Font(bold=True, size=10)
+                header_fill = PatternFill(start_color="D7E4BC", end_color="D7E4BC", fill_type="solid")
+                border = Border(
+                    left=Side(style='thin'),
+                    right=Side(style='thin'),
+                    top=Side(style='thin'),
+                    bottom=Side(style='thin')
+                )
+                
+                # Apply formatting to headers
+                for col in range(1, max_cols + 1):
+                    cell1 = worksheet.cell(row=1, column=col)
+                    cell2 = worksheet.cell(row=2, column=col)
+                    
+                    cell1.font = header_font
+                    cell1.fill = header_fill
+                    cell1.border = border
+                    cell1.alignment = Alignment(horizontal='center', vertical='center')
+                    
+                    cell2.font = header_font
+                    cell2.border = border
+                    cell2.alignment = Alignment(horizontal='center', vertical='center')
+                
+                # Set column widths
+                worksheet.column_dimensions['A'].width = 20
+                for col in range(2, max_cols + 1):
+                    col_letter = worksheet.cell(row=1, column=col).column_letter
+                    worksheet.column_dimensions[col_letter].width = 12
+                    
+            except ImportError:
+                # If openpyxl styling is not available, just save basic Excel
+                pass
 
     output.seek(0)
     
     # Calculate file size for user info
     file_size_mb = len(output.getvalue()) / (1024 * 1024)
     
+    engine_info = "with advanced formatting" if XLSXWRITER_AVAILABLE else "basic format"
+    
     st.download_button(
-        label=f"📥 Download Excel (MH Family SARIMA Forecast) - {file_size_mb:.1f}MB",
+        label=f"📥 Download Excel ({engine_info}) - {file_size_mb:.1f}MB",
         data=output,
         file_name=f"MH_Parts_Forecast_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -641,7 +700,16 @@ try:
     
 except Exception as e:
     st.error(f"❌ Error generating Excel file: {str(e)}")
-    st.info("You can still copy the data from the preview table above.")
+    st.info("📋 You can still copy the data from the preview table above.")
+    
+    # Provide CSV download as fallback
+    csv_output = result_df.to_csv(index=False)
+    st.download_button(
+        label="📥 Download as CSV (Fallback)",
+        data=csv_output,
+        file_name=f"MH_Parts_Forecast_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv",
+    )
 
 # Optional: Display method distribution
 st.write("### 🔍 Method Distribution")
