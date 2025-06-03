@@ -264,6 +264,18 @@ if uploaded_file:
         with st.expander("Data Preview"):
             st.dataframe(monthly_df.head(10))
             st.write(f"Date range: {monthly_df['Month'].min().strftime('%Y-%m')} to {monthly_df['Month'].max().strftime('%Y-%m')}")
+            st.write(f"Total months of data: {len(monthly_df)}")
+            
+            # Debug: Show what data exists for the forecast year
+            forecast_year_data = monthly_df[
+                (monthly_df['Month'] >= forecast_start) & 
+                (monthly_df['Month'] < forecast_end)
+            ]
+            if len(forecast_year_data) > 0:
+                st.write(f"**Data found for {forecast_year}:**")
+                st.dataframe(forecast_year_data)
+            else:
+                st.write(f"**No data found for {forecast_year}**")
         
         # Dynamic date splitting based on forecast year
         train_cutoff = pd.Timestamp(f"{forecast_year-1}-12-01")
@@ -338,11 +350,20 @@ if uploaded_file:
                     
                     # Merge with actual data - this ensures all actual data is included
                     if len(actual_forecast_df) > 0:
+                        st.write(f"**Merging actual data:** {len(actual_forecast_df)} rows")
+                        st.write("Actual data to merge:")
+                        st.dataframe(actual_forecast_df[['Month', f'Actual_{forecast_year}']])
+                        
                         result_df = pd.merge(result_df, actual_forecast_df[['Month', f'Actual_{forecast_year}']], 
                                            on='Month', how='left')
+                        
+                        # Verify merge worked
+                        actual_count = result_df[f'Actual_{forecast_year}'].notna().sum()
+                        st.write(f"**After merge:** {actual_count} months have actual data")
                     else:
                         # Add empty actual column if no actual data
                         result_df[f'Actual_{forecast_year}'] = np.nan
+                        st.write("No actual data to merge - added empty column")
                     
                     # Round numeric columns for display
                     numeric_cols = result_df.select_dtypes(include=[np.number]).columns
