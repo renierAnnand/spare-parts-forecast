@@ -265,17 +265,28 @@ if uploaded_file:
             st.dataframe(monthly_df.head(10))
             st.write(f"Date range: {monthly_df['Month'].min().strftime('%Y-%m')} to {monthly_df['Month'].max().strftime('%Y-%m')}")
             st.write(f"Total months of data: {len(monthly_df)}")
-            
-            # Debug: Show what data exists for the forecast year
+        
+        # Dynamic date splitting based on forecast year
+        train_cutoff = pd.Timestamp(f"{forecast_year-1}-12-01")
+        forecast_start = pd.Timestamp(f"{forecast_year}-01-01")
+        forecast_end = pd.Timestamp(f"{forecast_year+1}-01-01")
+        
+        # Debug: Show what data exists for the forecast year
+        try:
             forecast_year_data = monthly_df[
                 (monthly_df['Month'] >= forecast_start) & 
                 (monthly_df['Month'] < forecast_end)
             ]
             if len(forecast_year_data) > 0:
-                st.write(f"**Data found for {forecast_year}:**")
-                st.dataframe(forecast_year_data)
+                st.write(f"**Data found for {forecast_year}: {len(forecast_year_data)} months**")
+                with st.expander(f"Show {forecast_year} data"):
+                    st.dataframe(forecast_year_data)
             else:
                 st.write(f"**No data found for {forecast_year}**")
+        except Exception as e:
+            st.error(f"Error filtering {forecast_year} data: {str(e)}")
+            st.write("Data types:")
+            st.write(monthly_df.dtypes)
         
         # Dynamic date splitting based on forecast year
         train_cutoff = pd.Timestamp(f"{forecast_year-1}-12-01")
