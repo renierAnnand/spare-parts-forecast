@@ -63,42 +63,101 @@ def load_data(uploaded_file):
 @st.cache_data
 def load_actual_2024_data(uploaded_file, forecast_year):
     """
-    Load a separate 2024‐actuals file (same format, 'Month' & 'Sales'), filter to forecast_year only,
-    and return aggregated monthly sales. If no data found, return None.
+    Load the 2024‐actuals file and return aggregated monthly sales.
+    Handles both formats:
+    1. Long format: 'Month' and 'Sales' columns
+    2. Wide format: months as columns (Jan-2024, Feb-2024, etc.)
     """
     try:
         df = pd.read_excel(uploaded_file)
-    except Exception:
-        st.error("Could not read the 2024 actuals file.")
+        
+        # Check if it's the standard long format
+        if "Month" in df.columns and "Sales" in df.columns:
+            # Standard format handling
+            df["Month"] = pd.to_datetime(df["Month"], errors="coerce")
+            if df["Month"].isna().any():
+                st.error("Some dates in the 2024 actuals file could not be parsed.")
+                return None
+
+            df["Sales"] = pd.to_numeric(df["Sales"], errors="coerce").fillna(0)
+            df["Sales"] = df["Sales"].abs()
+
+            # Filter to the forecast year only
+            start = pd.Timestamp(f"{forecast_year}-01-01")
+            end = pd.Timestamp(f"{forecast_year+1}-01-01")
+            df = df[(df["Month"] >= start) & (df["Month"] < end)]
+            
+            if df.empty:
+                st.warning(f"No rows in the 2024 actuals file match year {forecast_year}.")
+                return None
+
+            monthly = df.groupby("Month", as_index=False)["Sales"].sum().sort_values("Month").reset_index(drop=True)
+            return monthly.rename(columns={"Sales": f"Actual_{forecast_year}"})
+        
+        else:
+            # Wide format handling (months as columns)
+            st.info("📊 Detected wide format data - converting to long format...")
+            
+            # Look for month columns that match the forecast year
+            month_cols = []
+            month_patterns = [
+                f"Jan-{forecast_year}", f"Feb-{forecast_year}", f"Mar-{forecast_year}",
+                f"Apr-{forecast_year}", f"May-{forecast_year}", f"Jun-{forecast_year}",
+                f"Jul-{forecast_year}", f"Aug-{forecast_year}", f"Sep-{forecast_year}",
+                f"Oct-{forecast_year}", f"Nov-{forecast_year}", f"Dec-{forecast_year}"
+            ]
+            
+            # Find which month columns exist in the data
+            available_months = []
+            for pattern in month_patterns:
+                if pattern in df.columns:
+                    available_months.append(pattern)
+            
+            if not available_months:
+                st.error(f"No month columns found for {forecast_year}. Expected columns like 'Jan-{forecast_year}', 'Feb-{forecast_year}', etc.")
+                return None
+            
+            st.success(f"Found {len(available_months)} months of data: {', '.join(available_months)}")
+            
+            # Skip header rows if they exist (look for rows where first column contains "Item" or similar)
+            first_col = df.columns[0]
+            data_rows = df[~df[first_col].astype(str).str.contains("Item|Code|QTY", case=False, na=False)]
+            
+            # Melt the data from wide to long format
+            melted_data = []
+            for _, row in data_rows.iterrows():
+                part_code = row[first_col]
+                for month_col in available_months:
+                    if month_col in row and pd.notna(row[month_col]):
+                        # Convert month string to datetime
+                        month_str = month_col.replace("-", "-01-")  # Jan-2024 -> Jan-01-2024
+                        try:
+                            month_date = pd.to_datetime(month_str, format="%b-%d-%Y")
+                            sales_value = pd.to_numeric(row[month_col], errors="coerce")
+                            if pd.notna(sales_value) and sales_value > 0:
+                                melted_data.append({
+                                    "Month": month_date,
+                                    "Part": part_code,
+                                    "Sales": abs(sales_value)
+                                })
+                        except:
+                            continue
+            
+            if not melted_data:
+                st.error("No valid sales data found in the file.")
+                return None
+            
+            # Convert to DataFrame and aggregate by month
+            long_df = pd.DataFrame(melted_data)
+            monthly = long_df.groupby("Month", as_index=False)["Sales"].sum().sort_values("Month").reset_index(drop=True)
+            
+            st.success(f"✅ Converted wide format data: {len(monthly)} months of aggregated sales data")
+            
+            return monthly.rename(columns={"Sales": f"Actual_{forecast_year}"})
+            
+    except Exception as e:
+        st.error(f"Error loading 2024 actual data: {str(e)}")
         return None
-
-    if "Month" not in df.columns or "Sales" not in df.columns:
-        st.error("Actual‐2024 file must contain 'Month' and 'Sales'.")
-        return None
-
-    df["Month"] = pd.to_datetime(df["Month"], errors="coerce")
-    if df["Month"].isna().any():
-        st.error("Some dates in the 2024 actuals file could not be parsed.")
-        return None
-
-    df["Sales"] = pd.to_numeric(df["Sales"], errors="coerce").fillna(0)
-    df["Sales"] = df["Sales"].abs()
-
-    # Filter to the forecast year (e.g. 2024)
-    start = pd.Timestamp(f"{forecast_year}-01-01")
-    end = pd.Timestamp(f"{forecast_year+1}-01-01")
-    df = df[(df["Month"] >= start) & (df["Month"] < end)]
-    if df.empty:
-        st.warning(f"No rows in the 2024 actuals file match year {forecast_year}.")
-        return None
-
-    monthly = (
-        df.groupby("Month", as_index=False)["Sales"]
-        .sum()
-        .sort_values("Month")
-        .reset_index(drop=True)
-    )
-    return monthly.rename(columns={"Sales": f"Actual_{forecast_year}"})
 
 
 def determine_sarima_order(ts, seasonal_period=12):
