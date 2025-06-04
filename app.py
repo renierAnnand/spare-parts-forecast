@@ -251,7 +251,7 @@ def run_advanced_prophet_forecast(data, forecast_periods=12, scaling_factor=1.0)
         
     except Exception as e:
         st.warning(f"Advanced Prophet failed: {str(e)}. Using enhanced fallback.")
-        return run_enhanced_pattern_forecast(data, forecast_periods, scaling_factor), np.inf
+        return run_enhanced_pattern_forecast(data, forecast_periods, scaling_factor), float('inf')
 
 
 def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0):
@@ -368,7 +368,7 @@ def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0):
             
     except Exception as e:
         st.warning(f"Advanced ETS failed: {str(e)}. Using enhanced fallback.")
-        return run_enhanced_pattern_forecast(data, forecast_periods, scaling_factor), np.infimport streamlit as st
+        return run_enhanced_pattern_forecast(data, forecast_periods, scaling_factor), float('inf')import streamlit as st
 
 # Configure streamlit FIRST - must be before any other st commands
 st.set_page_config(page_title="Enhanced Hierarchical Sales Forecasting Dashboard", layout="wide")
@@ -1055,7 +1055,7 @@ def run_advanced_sarima_forecast(data, forecast_periods=12, scaling_factor=1.0):
         
     except Exception as e:
         st.warning(f"Advanced SARIMA failed: {str(e)}. Using fallback.")
-        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+        return run_fallback_forecast(data, forecast_periods, scaling_factor), float('inf')
 
 
 def run_advanced_prophet_forecast(data, forecast_periods=12, scaling_factor=1.0):
@@ -1203,9 +1203,9 @@ def run_advanced_xgb_forecast(data, forecast_periods=12, scaling_factor=1.0):
         boxcox_transformed = work_data.get('boxcox_transformed', [False])[0] if len(work_data) > 0 else False
         boxcox_lambda = work_data.get('boxcox_lambda', [None])[0] if 'boxcox_lambda' in work_data.columns else None
         
+        # Fallback for insufficient data
         if len(work_data) < 24:
-            # Fallback for insufficient data
-            return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+            return run_enhanced_pattern_forecast(data, forecast_periods, scaling_factor), float('inf')
         
         # Prepare features for XGBoost
         feature_cols = []
@@ -1906,19 +1906,19 @@ def main():
                             st.warning(f"⚠️ {model_name} produced invalid forecast, using enhanced fallback")
                             fallback_forecast = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
                             forecast_results[f"{model_name}_Forecast"] = fallback_forecast
-                            validation_scores[model_name] = np.inf
+                            validation_scores[model_name] = float('inf')
                     else:
                         # Use fallback if forecast format is wrong
                         st.warning(f"⚠️ {model_name} returned invalid format, using enhanced fallback")
                         fallback_forecast = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
                         forecast_results[f"{model_name}_Forecast"] = fallback_forecast
-                        validation_scores[model_name] = np.inf
+                        validation_scores[model_name] = float('inf')
                     
                 except Exception as e:
                     st.error(f"❌ Advanced {model_name} failed: {str(e)}")
                     fallback_forecast = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
                     forecast_results[f"{model_name}_Forecast"] = fallback_forecast
-                    validation_scores[model_name] = np.inf
+                    validation_scores[model_name] = float('inf')
 
             progress_bar.progress((i + 1) / len(models_to_run))
 
@@ -2094,7 +2094,7 @@ def main():
                         metrics = calculate_accuracy_metrics(actual_subset[actual_col], actual_subset[col])
                         
                         if metrics:
-                            val_score = validation_scores.get(model_name.replace(' ', ''), np.inf)
+                            val_score = validation_scores.get(model_name.replace(' ', ''), np.nan)
                             perf_data.append({
                                 'Model': model_name,
                                 'MAPE': round(metrics['MAPE'], 2),
@@ -2102,7 +2102,7 @@ def main():
                                 'MAE': round(metrics['MAE'], 0),
                                 'RMSE': round(metrics['RMSE'], 0),
                                 'MASE': round(metrics['MASE'], 3),
-                                'Validation_Score': round(val_score, 2) if val_score != np.inf else 'N/A',
+                                'Validation_Score': round(val_score, 2) if val_score != float('inf') and not np.isnan(val_score) else 'N/A',
                                 'Total_Forecast': round(result_df[col].sum(), 0),
                                 'Scaling_Applied': f"{scaling_factor:.2f}x"
                             })
