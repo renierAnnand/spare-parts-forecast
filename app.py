@@ -52,82 +52,59 @@ def process_wide_hierarchical_format(df, year):
     try:
         st.info("🔧 Processing wide hierarchical format...")
         
-        # Your data structure: Row 0 has months, Row 1 has headers, Data starts from Row 2
-        month_row = df.iloc[0]  # MonthYear row with Jan-2022, Feb-2022, etc.
-        header_row = df.iloc[1]  # Item Code, Item Description, Brand, Engine, QTY...
+        # Your actual structure based on debug info:
+        # Row 0: Headers including Item Code, Description, Brand, Engine, then QTY columns
+        # Row 1+: Actual data
         
-        st.info(f"📅 Month row: {month_row.tolist()[:8]}")
-        st.info(f"📋 Header row: {header_row.tolist()[:8]}")
+        header_row = df.iloc[0]  # The header row
+        st.info(f"📋 Headers: {header_row.tolist()}")
         
-        # Find month columns - more aggressive search
-        month_cols = []
-        month_names = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 
-                      'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+        # Find the QTY columns - these represent monthly data
+        qty_cols = []
+        for i, header in enumerate(header_row):
+            if pd.notna(header) and 'qty' in str(header).lower():
+                qty_cols.append(i)
         
-        # Check ALL columns for month patterns
-        for i in range(len(df.columns)):
-            month_val = month_row.iloc[i] if i < len(month_row) else None
-            if pd.notna(month_val):
-                month_str = str(month_val).lower().strip()
-                
-                # Check for various month patterns
-                for month in month_names:
-                    if month in month_str:
-                        month_cols.append((i, month_val, month))
-                        break
-                
-                # Also check if it looks like a date pattern
-                if any(pattern in month_str for pattern in ['-2022', '-2023', '-2024', '/2022', '/2023', '/2024']):
-                    # Try to extract month from date-like patterns
-                    for month in month_names:
-                        if month in month_str:
-                            month_cols.append((i, month_val, month))
-                            break
+        st.info(f"📊 Found {len(qty_cols)} QTY columns at positions: {qty_cols}")
         
-        # Remove duplicates while preserving order
-        seen_months = set()
-        unique_month_cols = []
-        for col_idx, col_name, month_name in month_cols:
-            if month_name not in seen_months:
-                unique_month_cols.append((col_idx, col_name, month_name))
-                seen_months.add(month_name)
-        
-        month_cols = unique_month_cols
-        
-        st.info(f"📅 Found {len(month_cols)} month columns: {[col[1] for col in month_cols]}")
-        
-        # If still no month columns, try looking at column headers that contain 'QTY'
-        if not month_cols:
-            st.warning("🔍 No month columns found, trying QTY column approach...")
-            qty_cols = []
-            for i in range(4, len(df.columns)):  # Start from column 4
-                header_val = header_row.iloc[i] if i < len(header_row) else None
-                if pd.notna(header_val) and 'qty' in str(header_val).lower():
-                    # This might be a monthly sales column
-                    month_val = month_row.iloc[i] if i < len(month_row) else None
-                    if pd.notna(month_val):
-                        # Try to map to month based on position
-                        month_index = len(qty_cols)
-                        if month_index < 12:
-                            month_name = month_names[month_index]
-                            qty_cols.append((i, f"{month_name}-{year}", month_name))
+        # If we have 12 QTY columns, assume they represent months Jan-Dec
+        if len(qty_cols) == 12:
+            month_names = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 
+                          'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+            month_cols = []
+            for i, col_idx in enumerate(qty_cols):
+                month_name = month_names[i]
+                month_cols.append((col_idx, f"{month_name}-{year}", month_name))
             
-            if qty_cols:
-                month_cols = qty_cols
-                st.info(f"📅 Using QTY columns as months: {[col[1] for col in month_cols]}")
+            st.info(f"📅 Mapped QTY columns to months: {[col[1] for col in month_cols]}")
+        else:
+            # Alternative: look for any columns beyond the first 4 that might contain data
+            st.warning(f"Found {len(qty_cols)} QTY columns, not 12. Trying alternative approach...")
+            
+            # Assume columns 4+ are monthly data (Jan through Dec)
+            month_names = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 
+                          'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+            month_cols = []
+            
+            # Take first 12 columns after column 3 (Brand/Engine)
+            start_col = 4
+            for i in range(12):
+                col_idx = start_col + i
+                if col_idx < len(df.columns):
+                    month_name = month_names[i]
+                    month_cols.append((col_idx, f"{month_name}-{year}", month_name))
+            
+            st.info(f"📅 Using columns 4-15 as months: {[col[1] for col in month_cols]}")
         
         if not month_cols:
-            st.error("❌ No month columns found in wide format")
-            st.info("🔍 Debug information:")
-            st.info(f"First row (months): {month_row.tolist()}")
-            st.info(f"Second row (headers): {header_row.tolist()}")
+            st.error("❌ Could not determine month columns")
             return None
         
-        # Process data rows (starting from row 2)
+        # Process data rows (starting from row 1, since row 0 is headers)
         long_data = []
         rows_processed = 0
         
-        for idx in range(2, len(df)):
+        for idx in range(1, len(df)):
             row = df.iloc[idx]
             
             # Extract categorical data (first 4 columns)
@@ -175,22 +152,27 @@ def process_wide_hierarchical_format(df, year):
         if not long_data:
             st.warning(f"❌ No valid sales data found for {year}")
             st.info("🔍 Sample data from first few rows:")
-            for idx in range(2, min(5, len(df))):
+            for idx in range(1, min(4, len(df))):
                 row = df.iloc[idx]
-                st.info(f"Row {idx}: {row.iloc[:8].tolist()}")
+                sample_data = []
+                for i in range(min(8, len(row))):
+                    sample_data.append(str(row.iloc[i])[:20])  # Truncate long values
+                st.info(f"Row {idx}: {sample_data}")
             return None
         
         result_df = pd.DataFrame(long_data)
         
         # Show sample of processed data
-        st.info(f"📋 Sample processed data: {len(result_df)} records")
-        with st.expander(f"Preview {year} processed data"):
+        st.success(f"✅ Successfully extracted {len(long_data)} data points from {rows_processed} products")
+        with st.expander(f"Preview {year} processed data (first 10 records)"):
             st.dataframe(result_df.head(10))
         
         return create_monthly_aggregation(result_df, year)
         
     except Exception as e:
         st.error(f"❌ Error in wide format processing: {str(e)}")
+        import traceback
+        st.error(f"Full error: {traceback.format_exc()}")
         return None
 
 
@@ -522,8 +504,22 @@ def main():
             help="Upload 2022, 2023 data with Brand/Engine columns for enhanced forecasting"
         )
 
+    with col2:
+        st.markdown("**Validation Data (Optional)**")
+        actual_file = st.file_uploader(
+            f"📈 Upload {forecast_year} Actual Data",
+            type=["xlsx", "xls"],
+            help="For model validation and performance analysis (optional)"
+        )
+
     if not historical_files:
         st.info("👆 Please upload historical sales data files (2022, 2023) to begin enhanced forecasting.")
+        st.markdown("""
+        **📋 Expected Data Format:**
+        - **Row 1**: Month headers (Jan-2022, Feb-2022, etc.)
+        - **Row 2**: Column headers (Item Code, Description, Brand, Engine, QTY...)
+        - **Row 3+**: Product data with monthly sales
+        """)
         return
 
     # Load and validate enhanced data
