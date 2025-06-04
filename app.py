@@ -78,14 +78,35 @@ def load_enhanced_hierarchical_data(uploaded_files):
             
             years_processed.append(year)
             
-            # Check if it's the hierarchical format with brands and engines
-            if len(df.columns) >= 16 and 'Brand' in df.columns[2:4]:
-                st.info(f"📊 Processing hierarchical data for {year}...")
+            # Enhanced detection for hierarchical format
+            is_hierarchical = False
+            
+            # Check multiple indicators for hierarchical format
+            for check_row in range(min(5, len(df))):
+                row_values = df.iloc[check_row].astype(str).str.lower()
+                if any('brand' in val for val in row_values) or any('engine' in val for val in row_values):
+                    is_hierarchical = True
+                    break
+                if any('item code' in val for val in row_values) or any('description' in val for val in row_values):
+                    is_hierarchical = True
+                    break
+            
+            # Also check if we have monthly columns
+            first_row = df.iloc[0].astype(str)
+            has_month_cols = any(month in val.lower() for val in first_row for month in ['jan', 'feb', 'mar', 'apr', 'may', 'jun'])
+            
+            if is_hierarchical or has_month_cols:
+                st.info(f"📊 Processing enhanced hierarchical data for {year}...")
                 
                 # Process hierarchical format
                 df_processed = process_hierarchical_format(df, year)
                 if df_processed is not None:
                     all_data.append(df_processed)
+                else:
+                    st.warning(f"Failed to process hierarchical format for {year}, trying standard format...")
+                    df_processed = process_standard_format(df, year)
+                    if df_processed is not None:
+                        all_data.append(df_processed)
             
             else:
                 # Fallback to standard format
@@ -118,51 +139,88 @@ def load_enhanced_hierarchical_data(uploaded_files):
 def process_hierarchical_format(df, year):
     """Process the enhanced hierarchical format with brands and engines"""
     try:
-        # Find header row (usually row 1, with Item Code, Description, Brand, Engine)
+        st.info(f"🔍 Analyzing hierarchical structure for {year}...")
+        
+        # More flexible header detection
         header_row = None
-        for i in range(min(3, len(df))):
-            if 'Item Code' in str(df.iloc[i]).values or 'Brand' in str(df.iloc[i]).values:
+        for i in range(min(5, len(df))):
+            row_str = ' '.join(df.iloc[i].astype(str).str.lower())
+            if any(keyword in row_str for keyword in ['item code', 'brand', 'engine', 'description']):
                 header_row = i
+                st.info(f"📋 Found header row at position {i}")
                 break
         
         if header_row is None:
-            st.warning("Could not find header row in hierarchical format")
-            return None
+            # Try to find month columns in first row
+            first_row = df.iloc[0].astype(str)
+            if any(month in val.lower() for val in first_row for month in ['jan', 'feb', 'mar']):
+                header_row = 1  # Headers likely in second row
+                st.info("📋 Using row 1 as header based on month detection")
+            else:
+                st.warning("❌ Could not find header row in hierarchical format")
+                return None
         
-        # Get column names from header row
-        columns = df.iloc[header_row].tolist()
+        # Extract column information
+        if header_row == 0:
+            # Month columns in first row, data headers in second row
+            month_row = df.iloc[0]
+            data_headers = df.iloc[1] if len(df) > 1 else df.iloc[0]
+            data_start_row = 2
+        else:
+            # Headers in the detected row
+            data_headers = df.iloc[header_row]
+            month_row = df.iloc[0]  # Months typically in first row
+            data_start_row = header_row + 1
         
-        # Find month columns
+        st.info(f"📊 Data headers: {data_headers.tolist()[:6]}")
+        st.info(f"🗓️ Month row sample: {month_row.tolist()[:6]}")
+        
+        # Find month columns more flexibly
         month_cols = []
-        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
-                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        month_names = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 
+                      'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
         
-        for i, col in enumerate(columns):
-            if col and any(month in str(col) for month in month_names):
-                month_cols.append((i, col))
+        for i, col_val in enumerate(month_row):
+            if pd.notna(col_val):
+                col_str = str(col_val).lower()
+                for month in month_names:
+                    if month in col_str and str(year) in col_str:
+                        month_cols.append((i, col_val, month))
+                        break
+        
+        st.info(f"📅 Found {len(month_cols)} month columns: {[col[1] for col in month_cols]}")
         
         if not month_cols:
-            st.warning("Could not find month columns")
+            st.warning("❌ Could not find month columns with year")
             return None
+        
+        # Identify categorical columns (usually first 4 columns)
+        item_code_col = 0
+        description_col = 1
+        brand_col = 2
+        engine_col = 3
         
         # Process data rows
         long_data = []
+        rows_processed = 0
         
-        for idx in range(header_row + 1, len(df)):
+        for idx in range(data_start_row, len(df)):
             row = df.iloc[idx]
             
-            # Extract categorical data
-            item_code = row.iloc[0] if len(row) > 0 else ""
-            description = row.iloc[1] if len(row) > 1 else ""
-            brand = row.iloc[2] if len(row) > 2 else ""
-            engine = row.iloc[3] if len(row) > 3 else ""
+            # Extract categorical data with better handling
+            item_code = str(row.iloc[item_code_col]) if len(row) > item_code_col and pd.notna(row.iloc[item_code_col]) else ""
+            description = str(row.iloc[description_col]) if len(row) > description_col and pd.notna(row.iloc[description_col]) else ""
+            brand = str(row.iloc[brand_col]) if len(row) > brand_col and pd.notna(row.iloc[brand_col]) else "Unknown"
+            engine = str(row.iloc[engine_col]) if len(row) > engine_col and pd.notna(row.iloc[engine_col]) else "Unknown"
             
-            # Skip empty rows
-            if pd.isna(item_code) or item_code == "":
+            # Skip empty or invalid rows
+            if item_code == "" or item_code.lower() in ['nan', 'none']:
                 continue
+                
+            rows_processed += 1
             
             # Process monthly sales
-            for col_idx, col_name in month_cols:
+            for col_idx, col_name, month_name in month_cols:
                 sales_value = row.iloc[col_idx] if col_idx < len(row) else 0
                 
                 try:
@@ -171,38 +229,44 @@ def process_hierarchical_format(df, year):
                     sales_value = 0
                 
                 if sales_value > 0:  # Only include positive sales
-                    # Extract month from column name
-                    month_str = col_name.split('-')[0] if '-' in col_name else col_name[:3]
+                    # Create proper date
                     month_num = {
-                        'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
-                        'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12
-                    }.get(month_str, 1)
+                        'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+                        'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+                    }.get(month_name, 1)
                     
                     month_date = pd.Timestamp(year=year, month=month_num, day=1)
                     
                     long_data.append({
                         'Month': month_date,
                         'Sales': sales_value,
-                        'Item_Code': str(item_code),
-                        'Description': str(description),
-                        'Brand': str(brand),
-                        'Engine': str(engine)
+                        'Item_Code': item_code,
+                        'Description': description,
+                        'Brand': brand,
+                        'Engine': engine
                     })
         
+        st.info(f"📈 Processed {rows_processed} product rows, created {len(long_data)} data points")
+        
         if not long_data:
-            st.warning(f"No valid sales data found for {year}")
+            st.warning(f"❌ No valid sales data found for {year}")
             return None
         
         result_df = pd.DataFrame(long_data)
         
+        # Show sample of processed data
+        st.info(f"📋 Sample processed data: {len(result_df)} records")
+        with st.expander(f"Preview {year} processed data"):
+            st.dataframe(result_df.head(10))
+        
         # Aggregate by month (sum across all items)
         monthly_agg = result_df.groupby('Month').agg({
             'Sales': 'sum',
-            'Brand': lambda x: '|'.join(x.unique()),  # Concatenate unique brands
-            'Engine': lambda x: '|'.join(x.unique())  # Concatenate unique engines
+            'Brand': lambda x: '|'.join(x.unique()),
+            'Engine': lambda x: '|'.join(x.unique())
         }).reset_index()
         
-        # Add categorical features
+        # Add enhanced categorical features
         monthly_agg['Year'] = year
         monthly_agg['Sales_Original'] = monthly_agg['Sales'].copy()
         
@@ -216,18 +280,28 @@ def process_hierarchical_format(df, year):
         engine_diversity.columns = ['Month', 'Engine_Diversity']
         monthly_agg = monthly_agg.merge(engine_diversity, on='Month')
         
-        # Top brand sales share
+        # Top brand sales share per month
         for month in monthly_agg['Month']:
             month_data = result_df[result_df['Month'] == month]
-            brand_sales = month_data.groupby('Brand')['Sales'].sum()
-            top_brand_share = brand_sales.max() / brand_sales.sum() if len(brand_sales) > 0 else 0
-            monthly_agg.loc[monthly_agg['Month'] == month, 'Top_Brand_Share'] = top_brand_share
+            if len(month_data) > 0:
+                brand_sales = month_data.groupby('Brand')['Sales'].sum()
+                top_brand_share = brand_sales.max() / brand_sales.sum() if brand_sales.sum() > 0 else 0
+                monthly_agg.loc[monthly_agg['Month'] == month, 'Top_Brand_Share'] = top_brand_share
+            else:
+                monthly_agg.loc[monthly_agg['Month'] == month, 'Top_Brand_Share'] = 0
         
-        st.success(f"✅ Processed {len(long_data)} item-month records for {year}")
+        # Product diversity index
+        monthly_agg['Product_Diversity_Index'] = monthly_agg['Brand_Diversity'] * monthly_agg['Engine_Diversity']
+        
+        st.success(f"✅ Successfully processed {year}: {len(monthly_agg)} months with enhanced categorical features")
+        st.info(f"📊 Brand diversity range: {monthly_agg['Brand_Diversity'].min()}-{monthly_agg['Brand_Diversity'].max()}")
+        st.info(f"🔧 Engine diversity range: {monthly_agg['Engine_Diversity'].min()}-{monthly_agg['Engine_Diversity'].max()}")
+        
         return monthly_agg
         
     except Exception as e:
-        st.error(f"Error processing hierarchical format: {str(e)}")
+        st.error(f"❌ Error processing hierarchical format: {str(e)}")
+        st.info("🔄 This might help: Check if your data has Item Code, Brand, Engine columns and monthly data")
         return None
 
 
