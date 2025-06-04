@@ -59,24 +59,68 @@ def process_wide_hierarchical_format(df, year):
         st.info(f"📅 Month row: {month_row.tolist()[:8]}")
         st.info(f"📋 Header row: {header_row.tolist()[:8]}")
         
-        # Find month columns (columns 4 onwards typically contain monthly data)
+        # Find month columns - more aggressive search
         month_cols = []
         month_names = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 
                       'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
         
-        for i in range(4, min(len(df.columns), 16)):  # Check columns 4-15
+        # Check ALL columns for month patterns
+        for i in range(len(df.columns)):
             month_val = month_row.iloc[i] if i < len(month_row) else None
             if pd.notna(month_val):
-                month_str = str(month_val).lower()
+                month_str = str(month_val).lower().strip()
+                
+                # Check for various month patterns
                 for month in month_names:
                     if month in month_str:
                         month_cols.append((i, month_val, month))
                         break
+                
+                # Also check if it looks like a date pattern
+                if any(pattern in month_str for pattern in ['-2022', '-2023', '-2024', '/2022', '/2023', '/2024']):
+                    # Try to extract month from date-like patterns
+                    for month in month_names:
+                        if month in month_str:
+                            month_cols.append((i, month_val, month))
+                            break
+        
+        # Remove duplicates while preserving order
+        seen_months = set()
+        unique_month_cols = []
+        for col_idx, col_name, month_name in month_cols:
+            if month_name not in seen_months:
+                unique_month_cols.append((col_idx, col_name, month_name))
+                seen_months.add(month_name)
+        
+        month_cols = unique_month_cols
         
         st.info(f"📅 Found {len(month_cols)} month columns: {[col[1] for col in month_cols]}")
         
+        # If still no month columns, try looking at column headers that contain 'QTY'
         if not month_cols:
-            st.warning("❌ No month columns found in wide format")
+            st.warning("🔍 No month columns found, trying QTY column approach...")
+            qty_cols = []
+            for i in range(4, len(df.columns)):  # Start from column 4
+                header_val = header_row.iloc[i] if i < len(header_row) else None
+                if pd.notna(header_val) and 'qty' in str(header_val).lower():
+                    # This might be a monthly sales column
+                    month_val = month_row.iloc[i] if i < len(month_row) else None
+                    if pd.notna(month_val):
+                        # Try to map to month based on position
+                        month_index = len(qty_cols)
+                        if month_index < 12:
+                            month_name = month_names[month_index]
+                            qty_cols.append((i, f"{month_name}-{year}", month_name))
+            
+            if qty_cols:
+                month_cols = qty_cols
+                st.info(f"📅 Using QTY columns as months: {[col[1] for col in month_cols]}")
+        
+        if not month_cols:
+            st.error("❌ No month columns found in wide format")
+            st.info("🔍 Debug information:")
+            st.info(f"First row (months): {month_row.tolist()}")
+            st.info(f"Second row (headers): {header_row.tolist()}")
             return None
         
         # Process data rows (starting from row 2)
@@ -93,7 +137,7 @@ def process_wide_hierarchical_format(df, year):
             engine = str(row.iloc[3]) if len(row) > 3 and pd.notna(row.iloc[3]) else "Unknown"
             
             # Skip empty rows
-            if item_code == "" or item_code.lower() in ['nan', 'none']:
+            if item_code == "" or item_code.lower() in ['nan', 'none', 'null']:
                 continue
                 
             rows_processed += 1
@@ -130,6 +174,10 @@ def process_wide_hierarchical_format(df, year):
         
         if not long_data:
             st.warning(f"❌ No valid sales data found for {year}")
+            st.info("🔍 Sample data from first few rows:")
+            for idx in range(2, min(5, len(df))):
+                row = df.iloc[idx]
+                st.info(f"Row {idx}: {row.iloc[:8].tolist()}")
             return None
         
         result_df = pd.DataFrame(long_data)
