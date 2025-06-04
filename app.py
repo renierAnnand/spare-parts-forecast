@@ -438,6 +438,7 @@ class ImprovedSalesPredictionSystem:
         cv_scores = {}
         
         # XGBoost with regularization
+        print(f"Training XGBoost for part {part_code}")
         xgb_model = self.build_improved_xgboost()
         xgb_scores = []
         
@@ -445,176 +446,185 @@ class ImprovedSalesPredictionSystem:
             X_train, X_test = X_scaled[train_idx], X_scaled[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
             
-            xgb_model.fit(X_train, y_train, 
-                         eval_set=[(X_test, y_test)], 
-                         verbose=False)
-            
-            pred = xgb_model.predict(X_test)
-            score = mean_absolute_percentage_error(y_test, pred)
-            xgb_scores.append(score)
+            try:
+                xgb_model.fit(X_train, y_train, 
+                             eval_set=[(X_test, y_test)], 
+                             verbose=False)
+                
+                pred = xgb_model.predict(X_test)
+                score = mean_absolute_percentage_error(y_test, pred)
+                xgb_scores.append(score)
+            except Exception as e:
+                print(f"XGBoost CV failed for part {part_code}: {e}")
+                xgb_scores.append(float('inf'))
         
-        models['xgboost'] = xgb_model
-        cv_scores['xgboost'] = np.mean(xgb_scores)
+        # Final fit on all data
+        try:
+            final_xgb = self.build_improved_xgboost()
+            final_xgb.fit(X_scaled, y, verbose=False)
+            models['xgboost'] = final_xgb
+            cv_scores['xgboost'] = np.mean(xgb_scores) if xgb_scores else float('inf')
+        except Exception as e:
+            print(f"Final XGBoost training failed for part {part_code}: {e}")
         
         # Prophet
         try:
-            prophet_model, prophet_df = self.build_improved_prophet(df_clean)
+            print(f"Training Prophet for part {part_code}")
             prophet_scores = []
             
             for train_idx, test_idx in cv_splits:
-                train_data = prophet_df.iloc[train_idx]
-                test_data = prophet_df.iloc[test_idx]
+                train_data = df_clean.iloc[train_idx][['date', 'sales']].rename(columns={'date': 'ds', 'sales': 'y'})
+                test_data = df_clean.iloc[test_idx][['date', 'sales']].rename(columns={'date': 'ds', 'sales': 'y'})
                 
-                prophet_model.fit(train_data)
-                forecast = prophet_model.predict(test_data[['ds']])
+                try:
+                    prophet_model = Prophet(
+                        yearly_seasonality=True,
+                        weekly_seasonality=False,
+                        daily_seasonality=False,
+                        seasonality_mode='multiplicative',
+                        changepoint_prior_scale=0.01,
+                        seasonality_prior_scale=1.0,
+                        n_changepoints=10,
+                        interval_width=0.8
+                    )
+                    
+                    prophet_model.fit(train_data)
+                    forecast = prophet_model.predict(test_data[['ds']])
+                    
+                    pred = forecast['yhat'].values
+                    actual = test_data['y'].values
+                    score = mean_absolute_percentage_error(actual, pred)
+                    prophet_scores.append(score)
+                except Exception as e:
+                    print(f"Prophet CV iteration failed: {e}")
+                    prophet_scores.append(float('inf'))
+            
+            # Final Prophet model
+            try:
+                final_prophet = Prophet(
+                    yearly_seasonality=True,
+                    weekly_seasonality=False,
+                    daily_seasonality=False,
+                    seasonality_mode='multiplicative',
+                    changepoint_prior_scale=0.01,
+                    seasonality_prior_scale=1.0,
+                    n_changepoints=10,
+                    interval_width=0.8
+                )
                 
-                pred = forecast['yhat'].values
-                actual = test_data['y'].values
-                score = mean_absolute_percentage_error(actual, pred)
-                prophet_scores.append(score)
-            
-            models['prophet'] = prophet_model
-            cv_scores['prophet'] = np.mean(prophet_scores)
-            
+                prophet_df = df_clean[['date', 'sales']].rename(columns={'date': 'ds', 'sales': 'y'})
+                final_prophet.fit(prophet_df)
+                models['prophet'] = final_prophet
+                cv_scores['prophet'] = np.mean(prophet_scores) if prophet_scores else float('inf')
+            except Exception as e:
+                print(f"Final Prophet training failed for part {part_code}: {e}")
+                
         except Exception as e:
             print(f"Prophet failed for part {part_code}: {e}")
         
-        # ARIMA with auto-selection
+        # Simple Moving Average as baseline
         try:
-            # Simple ARIMA with cross-validation
-            arima_scores = []
+            print(f"Training Moving Average for part {part_code}")
+            ma_scores = []
             
             for train_idx, test_idx in cv_splits:
                 y_train, y_test = y[train_idx], y[test_idx]
                 
-                # Fit ARIMA
-                arima_model = ARIMA(y_train, order=(1, 1, 1))
-                arima_fit = arima_model.fit()
+                # Simple 3-month moving average
+                if len(y_train) >= 3:
+                    ma_pred = np.mean(y_train[-3:])  # Use last 3 months
+                    ma_pred_array = np.full(len(y_test), ma_pred)
+                    score = mean_absolute_percentage_error(y_test, ma_pred_array)
+                    ma_scores.append(score)
+            
+            # Store moving average model (just the last 3 values)
+            if len(y) >= 3:
+                models['moving_average'] = {'last_values': y[-3:].tolist()}
+                cv_scores['moving_average'] = np.mean(ma_scores) if ma_scores else float('inf')
                 
-                # Forecast
-                forecast = arima_fit.forecast(steps=len(y_test))
-                score = mean_absolute_percentage_error(y_test, forecast)
-                arima_scores.append(score)
-            
-            # Fit final model on all data
-            final_arima = ARIMA(y, order=(1, 1, 1)).fit()
-            models['arima'] = final_arima
-            cv_scores['arima'] = np.mean(arima_scores)
-            
         except Exception as e:
-            print(f"ARIMA failed for part {part_code}: {e}")
+            print(f"Moving Average failed for part {part_code}: {e}")
         
         # Ridge Regression
-        ridge_model = Ridge(alpha=1.0)
-        ridge_scores = []
-        
-        for train_idx, test_idx in cv_splits:
-            X_train, X_test = X_scaled[train_idx], X_scaled[test_idx]
-            y_train, y_test = y[train_idx], y[test_idx]
+        try:
+            print(f"Training Ridge for part {part_code}")
+            ridge_scores = []
             
-            ridge_model.fit(X_train, y_train)
-            pred = ridge_model.predict(X_test)
-            score = mean_absolute_percentage_error(y_test, pred)
-            ridge_scores.append(score)
+            for train_idx, test_idx in cv_splits:
+                X_train, X_test = X_scaled[train_idx], X_scaled[test_idx]
+                y_train, y_test = y[train_idx], y[test_idx]
+                
+                ridge_model = Ridge(alpha=1.0)
+                ridge_model.fit(X_train, y_train)
+                pred = ridge_model.predict(X_test)
+                score = mean_absolute_percentage_error(y_test, pred)
+                ridge_scores.append(score)
+            
+            # Final Ridge model
+            final_ridge = Ridge(alpha=1.0)
+            final_ridge.fit(X_scaled, y)
+            models['ridge'] = final_ridge
+            cv_scores['ridge'] = np.mean(ridge_scores) if ridge_scores else float('inf')
+            
+        except Exception as e:
+            print(f"Ridge failed for part {part_code}: {e}")
         
-        models['ridge'] = ridge_model
-        cv_scores['ridge'] = np.mean(ridge_scores)
-        
-        # LSTM (if TensorFlow is available)
+        # LSTM (if TensorFlow is available and enough data)
         if TENSORFLOW_AVAILABLE and len(df_clean) >= 36:
             try:
+                print(f"Training LSTM for part {part_code}")
                 lstm_scores = []
                 
                 for train_idx, test_idx in cv_splits:
                     y_train, y_test = y[train_idx], y[test_idx]
                     
-                    # Prepare LSTM data
-                    X_lstm_train, y_lstm_train = self.prepare_lstm_data(y_train, lookback=12)
-                    X_lstm_test, y_lstm_test = self.prepare_lstm_data(y_test, lookback=12)
-                    
-                    if len(X_lstm_train) > 0 and len(X_lstm_test) > 0:
-                        lstm_model = self.build_lstm_model((12, 1))
-                        X_lstm_train = X_lstm_train.reshape((X_lstm_train.shape[0], X_lstm_train.shape[1], 1))
-                        X_lstm_test = X_lstm_test.reshape((X_lstm_test.shape[0], X_lstm_test.shape[1], 1))
+                    if len(y_train) >= 24:  # Need enough data for LSTM
+                        X_lstm_train, y_lstm_train = self.prepare_lstm_data(y_train, lookback=12)
                         
-                        lstm_model.fit(X_lstm_train, y_lstm_train, epochs=50, batch_size=32, verbose=0)
-                        pred = lstm_model.predict(X_lstm_test)
-                        score = mean_absolute_percentage_error(y_lstm_test, pred.flatten())
-                        lstm_scores.append(score)
+                        if len(X_lstm_train) > 0:
+                            lstm_model = self.build_lstm_model((12, 1))
+                            X_lstm_train = X_lstm_train.reshape((X_lstm_train.shape[0], X_lstm_train.shape[1], 1))
+                            
+                            lstm_model.fit(X_lstm_train, y_lstm_train, epochs=50, batch_size=32, verbose=0)
+                            
+                            # Simple prediction using last 12 values
+                            if len(y_train) >= 12:
+                                last_sequence = y_train[-12:].reshape(1, 12, 1)
+                                lstm_pred = lstm_model.predict(last_sequence)[0, 0]
+                                lstm_pred_array = np.full(len(y_test), lstm_pred)
+                                score = mean_absolute_percentage_error(y_test, lstm_pred_array)
+                                lstm_scores.append(score)
                 
-                if lstm_scores:
-                    # Train final LSTM model
+                # Final LSTM model
+                if len(y) >= 24:
                     X_lstm_all, y_lstm_all = self.prepare_lstm_data(y, lookback=12)
-                    X_lstm_all = X_lstm_all.reshape((X_lstm_all.shape[0], X_lstm_all.shape[1], 1))
-                    
-                    final_lstm = self.build_lstm_model((12, 1))
-                    final_lstm.fit(X_lstm_all, y_lstm_all, epochs=100, batch_size=32, verbose=0)
-                    
-                    models['lstm'] = final_lstm
-                    cv_scores['lstm'] = np.mean(lstm_scores)
-                    
+                    if len(X_lstm_all) > 0:
+                        X_lstm_all = X_lstm_all.reshape((X_lstm_all.shape[0], X_lstm_all.shape[1], 1))
+                        
+                        final_lstm = self.build_lstm_model((12, 1))
+                        final_lstm.fit(X_lstm_all, y_lstm_all, epochs=100, batch_size=32, verbose=0)
+                        
+                        models['lstm'] = final_lstm
+                        cv_scores['lstm'] = np.mean(lstm_scores) if lstm_scores else float('inf')
+                        
             except Exception as e:
                 print(f"LSTM failed for part {part_code}: {e}")
+        
+        print(f"Completed training for part {part_code}. Models: {list(models.keys())}")
         
         return {
             'models': models,
             'cv_scores': cv_scores,
             'scaler': scaler,
-            'feature_cols': feature_cols
+            'feature_cols': feature_cols,
+            'recent_sales': y[-12:].tolist() if len(y) >= 12 else y.tolist()  # Store recent sales for prediction
         }
     
-    def create_ensemble_predictions(self, models_dict, X_scaled, method='weighted_avg'):
-        """Create ensemble predictions with different weighting strategies"""
-        
-        models = models_dict['models']
-        cv_scores = models_dict['cv_scores']
-        
-        predictions = {}
-        
-        # Get individual model predictions
-        for model_name, model in models.items():
-            if model_name == 'prophet':
-                # Prophet needs different input format
-                continue
-            elif model_name == 'arima':
-                # ARIMA needs different prediction method
-                pred = model.forecast(steps=1)[0]
-                predictions[model_name] = pred
-            elif model_name == 'lstm':
-                # LSTM needs different input format
-                continue
-            else:
-                predictions[model_name] = model.predict(X_scaled[-1:]).flatten()[0]
-        
-        if not predictions:
-            return None
-        
-        if method == 'simple_avg':
-            return np.mean(list(predictions.values()))
-        
-        elif method == 'weighted_avg':
-            # Weight by inverse of CV score (lower error = higher weight)
-            weights = {}
-            total_weight = 0
-            
-            for model_name in predictions.keys():
-                if model_name in cv_scores:
-                    weight = 1 / (cv_scores[model_name] + 0.01)  # Add small epsilon
-                    weights[model_name] = weight
-                    total_weight += weight
-            
-            if total_weight == 0:
-                return np.mean(list(predictions.values()))
-            
-            # Normalize weights
-            weighted_pred = 0
-            for model_name, pred in predictions.items():
-                if model_name in weights:
-                    weighted_pred += pred * (weights[model_name] / total_weight)
-            
-            return weighted_pred
-        
-        return np.mean(list(predictions.values()))
+    def create_ensemble_predictions(self, models_dict, method='weighted_avg'):
+        """Create ensemble predictions with different weighting strategies - DEPRECATED"""
+        # This method is now replaced by the logic in predict_next_month
+        # Keeping for backward compatibility
+        return None
     
     def train_system(self, df):
         """Train the complete prediction system"""
@@ -651,33 +661,143 @@ class ImprovedSalesPredictionSystem:
         
         model_data = self.models[part_code]
         models = model_data['models']
-        scaler = model_data['scaler']
-        feature_cols = model_data['feature_cols']
+        cv_scores = model_data['cv_scores']
         
-        # Get latest data for the part
-        df_part = df[df['part_code'] == part_code].sort_values('date')
+        predictions = {}
         
-        # Engineer features for the latest data point
-        df_features = self.engineer_features(df)
-        df_part_features = df_features[df_features['part_code'] == part_code].sort_values('date')
-        
-        # Get the most recent complete record
-        latest_features = df_part_features[feature_cols].dropna().iloc[-1:]
-        
-        if len(latest_features) == 0:
+        try:
+            # XGBoost prediction
+            if 'xgboost' in models:
+                try:
+                    scaler = model_data['scaler']
+                    feature_cols = model_data['feature_cols']
+                    
+                    # Get latest data for the part
+                    df_part = df[df['part_code'] == part_code].sort_values('date')
+                    
+                    if len(df_part) > 0:
+                        # Engineer features for the latest data
+                        df_features = self.engineer_features(df)
+                        df_part_features = df_features[df_features['part_code'] == part_code].sort_values('date')
+                        
+                        # Get the most recent complete record
+                        latest_features = df_part_features[feature_cols].dropna()
+                        
+                        if len(latest_features) > 0:
+                            X_latest = scaler.transform(latest_features.iloc[-1:].values)
+                            xgb_pred = models['xgboost'].predict(X_latest)[0]
+                            predictions['xgboost'] = max(0, xgb_pred)  # Ensure non-negative
+                except Exception as e:
+                    print(f"XGBoost prediction failed for {part_code}: {e}")
+            
+            # Prophet prediction
+            if 'prophet' in models:
+                try:
+                    prophet_model = models['prophet']
+                    
+                    # Get last date and predict next month
+                    df_part = df[df['part_code'] == part_code].sort_values('date')
+                    if len(df_part) > 0:
+                        last_date = df_part['date'].max()
+                        next_date = last_date + pd.DateOffset(months=1)
+                        
+                        future_df = pd.DataFrame({'ds': [next_date]})
+                        forecast = prophet_model.predict(future_df)
+                        
+                        prophet_pred = forecast['yhat'].values[0]
+                        predictions['prophet'] = max(0, prophet_pred)
+                except Exception as e:
+                    print(f"Prophet prediction failed for {part_code}: {e}")
+            
+            # Moving Average prediction
+            if 'moving_average' in models:
+                try:
+                    last_values = model_data['models']['moving_average']['last_values']
+                    ma_pred = np.mean(last_values)
+                    predictions['moving_average'] = max(0, ma_pred)
+                except Exception as e:
+                    print(f"Moving Average prediction failed for {part_code}: {e}")
+            
+            # Ridge prediction
+            if 'ridge' in models:
+                try:
+                    scaler = model_data['scaler']
+                    feature_cols = model_data['feature_cols']
+                    
+                    # Get latest data for the part
+                    df_part = df[df['part_code'] == part_code].sort_values('date')
+                    
+                    if len(df_part) > 0:
+                        # Engineer features for the latest data
+                        df_features = self.engineer_features(df)
+                        df_part_features = df_features[df_features['part_code'] == part_code].sort_values('date')
+                        
+                        # Get the most recent complete record
+                        latest_features = df_part_features[feature_cols].dropna()
+                        
+                        if len(latest_features) > 0:
+                            X_latest = scaler.transform(latest_features.iloc[-1:].values)
+                            ridge_pred = models['ridge'].predict(X_latest)[0]
+                            predictions['ridge'] = max(0, ridge_pred)
+                except Exception as e:
+                    print(f"Ridge prediction failed for {part_code}: {e}")
+            
+            # LSTM prediction
+            if 'lstm' in models:
+                try:
+                    recent_sales = model_data['recent_sales']
+                    if len(recent_sales) >= 12:
+                        lstm_input = np.array(recent_sales[-12:]).reshape(1, 12, 1)
+                        lstm_pred = models['lstm'].predict(lstm_input)[0, 0]
+                        predictions['lstm'] = max(0, lstm_pred)
+                except Exception as e:
+                    print(f"LSTM prediction failed for {part_code}: {e}")
+            
+            # If no predictions were successful, use simple average of recent sales
+            if not predictions:
+                df_part = df[df['part_code'] == part_code].sort_values('date')
+                if len(df_part) >= 3:
+                    recent_avg = df_part['sales'].tail(3).mean()
+                    predictions['fallback'] = max(0, recent_avg)
+            
+            # Create ensemble prediction
+            if predictions:
+                # Weight by inverse of CV score (lower error = higher weight)
+                weights = {}
+                total_weight = 0
+                
+                for model_name in predictions.keys():
+                    if model_name in cv_scores and cv_scores[model_name] != float('inf'):
+                        weight = 1 / (cv_scores[model_name] + 0.01)  # Add small epsilon
+                        weights[model_name] = weight
+                        total_weight += weight
+                    else:
+                        weights[model_name] = 1.0  # Default weight
+                        total_weight += 1.0
+                
+                if total_weight == 0:
+                    ensemble_pred = np.mean(list(predictions.values()))
+                else:
+                    # Normalize weights and compute weighted average
+                    ensemble_pred = 0
+                    for model_name, pred in predictions.items():
+                        normalized_weight = weights[model_name] / total_weight
+                        ensemble_pred += pred * normalized_weight
+                
+                return {
+                    'part_code': part_code,
+                    'predicted_sales': ensemble_pred,
+                    'individual_predictions': predictions,
+                    'models_used': list(predictions.keys()),
+                    'cv_scores': cv_scores,
+                    'weights_used': weights if total_weight > 0 else {}
+                }
+            
             return None
-        
-        X_scaled = scaler.transform(latest_features.values)
-        
-        # Get ensemble prediction
-        ensemble_pred = self.create_ensemble_predictions(model_data, X_scaled, method='weighted_avg')
-        
-        return {
-            'part_code': part_code,
-            'predicted_sales': ensemble_pred,
-            'models_used': list(models.keys()),
-            'cv_scores': model_data['cv_scores']
-        }
+            
+        except Exception as e:
+            print(f"Overall prediction failed for part {part_code}: {e}")
+            return None
     
     def evaluate_system_performance(self, df):
         """Evaluate the overall system performance"""
