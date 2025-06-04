@@ -972,69 +972,111 @@ def main():
             
             # Enhanced sales column detection for your data
             if sales_col is None:
-                # Look for numeric columns, excluding unnamed and date columns
-                numeric_cols = []
-                for col in hist_df.columns:
-                    if (col != date_col and 
-                        'unnamed' not in col.lower() and 
-                        'source' not in col.lower() and
-                        pd.api.types.is_numeric_dtype(hist_df[col])):
-                        # Check if column has meaningful numeric data
-                        non_zero_count = (hist_df[col] != 0).sum()
-                        if non_zero_count > len(hist_df) * 0.1:  # At least 10% non-zero values
-                            numeric_cols.append((col, non_zero_count))
+                st.warning("⚠️ Could not auto-detect sales column. Analyzing your data structure:")
                 
-                # Sort by number of non-zero values and pick the best
-                if numeric_cols:
-                    numeric_cols.sort(key=lambda x: x[1], reverse=True)
-                    sales_col = numeric_cols[0][0]
-                    st.info(f"💰 Auto-detected sales column: '{sales_col}' (most data points)")
-                else:
-                    # Last resort: look at all columns and let user see data
-                    st.warning("⚠️ Could not auto-detect sales column. Showing your data structure:")
+                # Show detailed column analysis
+                st.write("**Column Analysis:**")
+                col_info = []
+                for col in hist_df.columns:
+                    if col != date_col and 'source' not in col.lower():
+                        dtype = str(hist_df[col].dtype)
+                        non_null = hist_df[col].count()
+                        unique_vals = hist_df[col].nunique()
+                        
+                        # Try to identify potential sales columns
+                        sample_values = hist_df[col].dropna().head(5).tolist()
+                        
+                        # Check if column can be converted to numeric
+                        numeric_convertible = False
+                        try:
+                            pd.to_numeric(hist_df[col], errors='coerce').dropna()
+                            numeric_convertible = True
+                        except:
+                            pass
+                        
+                        col_info.append({
+                            'Column': col,
+                            'Type': dtype,
+                            'Non-null': non_null,
+                            'Unique': unique_vals,
+                            'Numeric?': 'Yes' if numeric_convertible else 'No',
+                            'Sample Values': str(sample_values)[:100] + '...' if len(str(sample_values)) > 100 else str(sample_values)
+                        })
+                
+                if col_info:
+                    col_df = pd.DataFrame(col_info)
+                    st.dataframe(col_df, use_container_width=True)
                     
-                    # Show sample data to help identify correct columns
+                    # Show sample of actual data
+                    st.write("**Sample of your data:**")
                     sample_df = hist_df.head(10)
                     st.dataframe(sample_df, use_container_width=True)
                     
-                    # Show column info
-                    st.write("**Column Information:**")
-                    for col in hist_df.columns:
-                        dtype = hist_df[col].dtype
-                        non_null = hist_df[col].count()
-                        unique_vals = hist_df[col].nunique()
-                        st.write(f"• {col}: {dtype}, {non_null} non-null values, {unique_vals} unique values")
+                    # Enhanced manual selection with better options
+                    st.markdown("### 🔧 Manual Column Selection")
                     
-                    # Let user manually select columns
-                    st.subheader("🔧 Manual Column Selection")
-                    date_col = st.selectbox("Select Date/Month Column:", hist_df.columns.tolist(), 
-                                           index=0 if date_col is None else hist_df.columns.tolist().index(date_col))
+                    # Filter columns for selection (exclude date and source columns)
+                    selectable_columns = [col for col in hist_df.columns 
+                                        if col != date_col and 'source' not in col.lower() and 'unnamed' not in col.lower()]
                     
-                    numeric_columns = [col for col in hist_df.columns if pd.api.types.is_numeric_dtype(hist_df[col])]
-                    if numeric_columns:
-                        sales_col = st.selectbox("Select Sales/Quantity Column:", numeric_columns)
+                    if selectable_columns:
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.write("**Date Column (detected):**")
+                            st.info(f"✅ {date_col}")
+                        
+                        with col2:
+                            st.write("**Select Sales/Quantity Column:**")
+                            sales_col = st.selectbox(
+                                "Choose the column with sales/quantity data:", 
+                                selectable_columns,
+                                help="Select the column that contains your sales, quantity, or revenue data"
+                            )
+                        
+                        # Test the selected sales column
+                        if sales_col:
+                            try:
+                                # Try to convert to numeric
+                                test_numeric = pd.to_numeric(hist_df[sales_col], errors='coerce')
+                                valid_count = test_numeric.dropna().count()
+                                total_count = len(hist_df)
+                                
+                                if valid_count > 0:
+                                    st.success(f"✅ Selected column '{sales_col}' has {valid_count}/{total_count} valid numeric values")
+                                    
+                                    # Show preview of converted data
+                                    preview_data = hist_df[[date_col, sales_col]].head()
+                                    preview_data[f'{sales_col}_numeric'] = pd.to_numeric(preview_data[sales_col], errors='coerce')
+                                    st.write("**Preview of selected data:**")
+                                    st.dataframe(preview_data, use_container_width=True)
+                                    
+                                    if st.button("✅ Process with Selected Columns", type="primary"):
+                                        # Continue processing with selected columns
+                                        pass
+                                    else:
+                                        st.info("👆 Click 'Process with Selected Columns' to continue")
+                                        return
+                                else:
+                                    st.error(f"❌ Selected column '{sales_col}' has no valid numeric data")
+                                    return
+                            except Exception as e:
+                                st.error(f"❌ Error testing column '{sales_col}': {str(e)}")
+                                return
                     else:
-                        st.error("❌ No numeric columns found for sales data")
+                        st.error("❌ No suitable columns found for sales data")
                         return
-                    
-                    if st.button("Process with Selected Columns"):
-                        pass  # Continue processing
-                    else:
-                        st.info("👆 Please select columns and click 'Process with Selected Columns'")
-                        return
+                else:
+                    st.error("❌ No columns available for analysis")
+                    return
             
             if date_col is None:
                 st.error("❌ Could not find a date/month column. Please ensure your data has a column with dates.")
                 st.info("Your columns: " + ", ".join(hist_df.columns))
-                
-                # Show sample data to help user identify columns
-                st.subheader("📋 Sample of your data:")
-                st.dataframe(hist_df.head(), use_container_width=True)
                 return
             
             if sales_col is None:
-                st.error("❌ Could not find a sales/quantity column. Please ensure your data has a numeric sales column.")
-                st.info("Your columns: " + ", ".join(hist_df.columns))
+                st.error("❌ No sales column selected. Please select a sales column above.")
                 return
             
             # Rename columns to standard names
