@@ -71,6 +71,7 @@ def main():
     """
     st.title("🚀 Advanced AI Sales Forecasting Dashboard")
     st.markdown("**Next-generation forecasting with ML optimization, ensemble weighting, and meta-learning**")
+    st.markdown("**Next-generation forecasting with ML optimization, ensemble weighting, and meta-learning**")
 
     # Sidebar configuration
     st.sidebar.header("⚙️ Advanced Configuration")
