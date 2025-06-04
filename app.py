@@ -47,75 +47,94 @@ class ImprovedSalesPredictionSystem:
             else:  # File path
                 df_2024 = pd.read_excel(sales_2024_file)
             
-            # Clean 2024 data structure
-            # First, let's inspect the actual structure
-            print("2024 file shape:", df_2024.shape)
-            print("2024 file columns:", df_2024.columns.tolist())
+            print("=== 2024 FILE ANALYSIS ===")
+            print("Shape:", df_2024.shape)
+            print("Original columns:", df_2024.columns.tolist())
+            print("First few rows:")
+            print(df_2024.head(3))
             
-            # Handle the case where first row might be headers
-            if df_2024.iloc[0, 0] == 'Item Code' or 'Item Code' in str(df_2024.iloc[0, 0]):
-                df_2024_clean = df_2024.iloc[1:].copy()  # Skip header row
-                # Set proper column names
-                expected_cols = ['part_code', 'description', 'brand', 'engine'] + \
-                               [f'month_{i:02d}_2024' for i in range(1, 13)]
-                
-                # Adjust column count to match actual data
-                actual_cols = min(len(expected_cols), df_2024_clean.shape[1])
-                df_2024_clean.columns = expected_cols[:actual_cols]
-                
+            # Clean 2024 data - handle header row detection
+            first_cell = str(df_2024.iloc[0, 0]).strip() if len(df_2024) > 0 else ""
+            
+            if 'item code' in first_cell.lower() or 'part' in first_cell.lower():
+                # First row contains headers, skip it
+                df_2024_data = df_2024.iloc[1:].copy()
+                print("Detected header row, skipping first row")
             else:
-                df_2024_clean = df_2024.copy()
-                # Auto-detect columns
-                cols = df_2024_clean.columns.tolist()
-                month_cols = [col for col in cols if any(month in str(col).lower() 
-                             for month in ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
-                                         'jul', 'aug', 'sep', 'oct', 'nov', 'dec'])]
-                
-                if len(month_cols) >= 4:  # At least 4 months of data
-                    non_month_cols = [col for col in cols if col not in month_cols]
-                    new_cols = ['part_code', 'description', 'brand', 'engine'][:len(non_month_cols)] + month_cols
-                    df_2024_clean.columns = new_cols[:df_2024_clean.shape[1]]
+                df_2024_data = df_2024.copy()
+                print("No header row detected")
             
-            # Get the month columns for melting
-            month_cols = [col for col in df_2024_clean.columns if 'month_' in col or 
-                         any(month in str(col).lower() for month in ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
-                                                                    'jul', 'aug', 'sep', 'oct', 'nov', 'dec'])]
+            # Reset index and handle column naming
+            df_2024_data = df_2024_data.reset_index(drop=True)
             
+            # Identify structure based on content
+            ncols = df_2024_data.shape[1]
+            print(f"Data has {ncols} columns")
+            
+            # Standard structure: part_code, description, brand, engine, then 12 months
+            if ncols >= 16:  # At least 4 metadata + 12 months
+                new_cols = ['part_code', 'description', 'brand', 'engine'] + [f'month_{i:02d}' for i in range(1, 13)]
+                df_2024_data.columns = new_cols[:ncols]
+            elif ncols >= 13:  # At least 1 metadata + 12 months
+                new_cols = ['part_code'] + [f'month_{i:02d}' for i in range(1, ncols)]
+                df_2024_data.columns = new_cols
+            else:
+                # Fallback: use original columns
+                df_2024_data.columns = [f'col_{i}' for i in range(ncols)]
+                df_2024_data = df_2024_data.rename(columns={df_2024_data.columns[0]: 'part_code'})
+            
+            print("New column names:", df_2024_data.columns.tolist())
+            
+            # Remove rows with missing part codes
+            df_2024_data = df_2024_data.dropna(subset=['part_code'])
+            df_2024_data = df_2024_data[df_2024_data['part_code'].astype(str).str.strip() != '']
+            
+            # Identify month columns
+            month_cols = [col for col in df_2024_data.columns if col.startswith('month_')]
             if not month_cols:
-                # Fallback: assume last 12 columns are months
-                month_cols = df_2024_clean.columns[-12:].tolist()
+                # Try to identify by content or position
+                possible_month_cols = df_2024_data.columns[1:13] if ncols >= 13 else df_2024_data.columns[1:]
+                month_cols = [col for col in possible_month_cols if col not in ['description', 'brand', 'engine']]
             
-            # Melt 2024 data to long format
-            id_vars = ['part_code', 'description', 'brand', 'engine']
-            available_id_vars = [col for col in id_vars if col in df_2024_clean.columns]
+            print("Identified month columns:", month_cols)
             
-            df_2024_long = df_2024_clean.melt(
-                id_vars=available_id_vars,
+            # Prepare metadata columns
+            metadata_cols = ['description', 'brand', 'engine']
+            available_metadata = [col for col in metadata_cols if col in df_2024_data.columns]
+            
+            # Melt to long format
+            melt_id_vars = ['part_code'] + available_metadata
+            df_2024_long = df_2024_data.melt(
+                id_vars=melt_id_vars,
                 value_vars=month_cols,
-                var_name='month',
+                var_name='month_col',
                 value_name='sales'
             )
             
-            # Create proper dates for 2024 data
-            month_mapping = {
-                'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
-                'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
-            }
+            # Convert month column to actual dates
+            def month_col_to_date(month_col):
+                try:
+                    if 'month_' in month_col:
+                        month_num = int(month_col.split('_')[1])
+                        return pd.to_datetime(f'2024-{month_num:02d}-01')
+                    else:
+                        # Try to extract month from column name
+                        month_mapping = {
+                            'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+                            'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+                        }
+                        col_lower = str(month_col).lower()
+                        for month_name, month_num in month_mapping.items():
+                            if month_name in col_lower:
+                                return pd.to_datetime(f'2024-{month_num:02d}-01')
+                        return pd.to_datetime('2024-01-01')  # Fallback
+                except:
+                    return pd.to_datetime('2024-01-01')
             
-            def extract_month_number(month_str):
-                month_str = str(month_str).lower()
-                for month_name, month_num in month_mapping.items():
-                    if month_name in month_str:
-                        return month_num
-                # Fallback: try to extract number
-                import re
-                numbers = re.findall(r'\d+', month_str)
-                if numbers:
-                    return min(int(numbers[0]), 12)
-                return 1
+            df_2024_long['date'] = df_2024_long['month_col'].apply(month_col_to_date)
+            df_2024_long['sales'] = pd.to_numeric(df_2024_long['sales'], errors='coerce')
             
-            df_2024_long['month_num'] = df_2024_long['month'].apply(extract_month_number)
-            df_2024_long['date'] = pd.to_datetime('2024-' + df_2024_long['month_num'].astype(str) + '-01')
+            print(f"2024 data after processing: {len(df_2024_long)} rows")
             
             # Load 2022-2023 historical data
             if hasattr(sales_2022_2023_file, 'read'):  # Streamlit uploaded file
@@ -123,85 +142,117 @@ class ImprovedSalesPredictionSystem:
             else:  # File path
                 df_hist = pd.read_excel(sales_2022_2023_file)
             
-            print("Historical file shape:", df_hist.shape)
-            print("Historical file columns:", df_hist.columns.tolist())
+            print("\n=== HISTORICAL FILE ANALYSIS ===")
+            print("Shape:", df_hist.shape)
+            print("Columns:", df_hist.columns.tolist())
+            print("First few rows:")
+            print(df_hist.head(3))
             
-            # Handle different possible column names
+            # Smart column detection for historical data
+            col_names = df_hist.columns.tolist()
+            
+            # Find part column
             part_col = None
-            sales_col = None
-            month_col = None
-            
-            for col in df_hist.columns:
-                col_lower = str(col).lower()
-                if 'part' in col_lower and part_col is None:
+            for col in col_names:
+                if 'part' in str(col).lower():
                     part_col = col
-                elif 'sales' in col_lower and sales_col is None:
+                    break
+            if part_col is None:
+                part_col = col_names[0]  # Use first column as fallback
+            
+            # Find sales column
+            sales_col = None
+            for col in col_names:
+                if 'sales' in str(col).lower() or 'value' in str(col).lower():
                     sales_col = col
-                elif 'month' in col_lower or 'date' in col_lower and month_col is None:
-                    month_col = col
+                    break
+            if sales_col is None:
+                sales_col = col_names[-1]  # Use last column as fallback
             
-            # Fallback to position-based if column names not found
-            if not all([part_col, sales_col, month_col]) and df_hist.shape[1] >= 3:
-                part_col = df_hist.columns[0]
-                month_col = df_hist.columns[1] 
-                sales_col = df_hist.columns[2]
+            # Find month/date column
+            date_col = None
+            for col in col_names:
+                if any(word in str(col).lower() for word in ['month', 'date', 'time']):
+                    date_col = col
+                    break
+            if date_col is None:
+                date_col = col_names[1]  # Use second column as fallback
             
-            # Clean historical data
-            df_hist_clean = df_hist[[part_col, month_col, sales_col]].copy()
-            df_hist_clean.columns = ['part_code', 'month_raw', 'sales']
+            print(f"Detected columns - Part: {part_col}, Date: {date_col}, Sales: {sales_col}")
             
-            # Convert Excel dates to proper datetime
-            def convert_excel_date(date_val):
+            # Create clean historical dataset
+            df_hist_clean = df_hist[[part_col, date_col, sales_col]].copy()
+            df_hist_clean.columns = ['part_code', 'date_raw', 'sales']
+            
+            # Convert dates
+            def safe_date_convert(date_val):
                 try:
                     if pd.isna(date_val):
                         return pd.NaT
+                    
+                    # Handle Excel serial dates
                     if isinstance(date_val, (int, float)):
-                        # Excel date number
-                        return pd.to_datetime('1900-01-01') + pd.to_timedelta(date_val - 2, unit='D')
-                    else:
-                        # Try to parse as regular date
-                        return pd.to_datetime(date_val)
+                        if date_val > 40000:  # Reasonable Excel date range
+                            return pd.to_datetime('1900-01-01') + pd.to_timedelta(date_val - 2, unit='D')
+                    
+                    # Try direct conversion
+                    return pd.to_datetime(date_val)
+                    
                 except:
                     return pd.NaT
             
-            df_hist_clean['date'] = df_hist_clean['month_raw'].apply(convert_excel_date)
+            df_hist_clean['date'] = df_hist_clean['date_raw'].apply(safe_date_convert)
             df_hist_clean = df_hist_clean.dropna(subset=['date'])
-            
-            # Ensure sales is numeric
-            df_2024_long['sales'] = pd.to_numeric(df_2024_long['sales'], errors='coerce')
             df_hist_clean['sales'] = pd.to_numeric(df_hist_clean['sales'], errors='coerce')
+            
+            print(f"Historical data after processing: {len(df_hist_clean)} rows")
             
             # Combine datasets
             hist_subset = df_hist_clean[['part_code', 'date', 'sales']].copy()
             current_subset = df_2024_long[['part_code', 'date', 'sales']].copy()
             
+            # Ensure part_code is string in both datasets
+            hist_subset['part_code'] = hist_subset['part_code'].astype(str)
+            current_subset['part_code'] = current_subset['part_code'].astype(str)
+            
             combined_df = pd.concat([hist_subset, current_subset], ignore_index=True)
             
-            # Add part metadata from 2024 data
-            if len(available_id_vars) > 1:
-                part_info = df_2024_clean[available_id_vars].drop_duplicates()
-                combined_df = combined_df.merge(part_info, on='part_code', how='left')
+            # Add metadata
+            if available_metadata:
+                metadata_df = df_2024_long[['part_code'] + available_metadata].drop_duplicates()
+                metadata_df['part_code'] = metadata_df['part_code'].astype(str)
+                combined_df = combined_df.merge(metadata_df, on='part_code', how='left')
             
-            # Fill missing metadata
+            # Fill missing metadata columns
             for col in ['description', 'brand', 'engine']:
                 if col not in combined_df.columns:
                     combined_df[col] = 'Unknown'
                 else:
                     combined_df[col] = combined_df[col].fillna('Unknown')
             
-            # Sort by part and date
+            # Final cleanup
+            combined_df = combined_df.dropna(subset=['sales'])
+            combined_df = combined_df[combined_df['sales'] >= 0]  # Remove negative sales
             combined_df = combined_df.sort_values(['part_code', 'date']).reset_index(drop=True)
-            combined_df = combined_df.dropna(subset=['sales'])  # Remove rows with missing sales
             
-            print(f"Successfully loaded {len(combined_df)} records for {combined_df['part_code'].nunique()} parts")
+            print(f"\n=== FINAL DATASET ===")
+            print(f"Total records: {len(combined_df)}")
+            print(f"Unique parts: {combined_df['part_code'].nunique()}")
             print(f"Date range: {combined_df['date'].min()} to {combined_df['date'].max()}")
+            print(f"Columns: {combined_df.columns.tolist()}")
+            
+            if len(combined_df) == 0:
+                raise ValueError("No valid data found after processing. Please check your file formats.")
             
             return combined_df
             
         except Exception as e:
-            print(f"Error loading data: {str(e)}")
-            print("Please check your file formats and try again.")
-            raise e
+            error_msg = f"Error loading data: {str(e)}"
+            print(error_msg)
+            import traceback
+            print("Full traceback:")
+            print(traceback.format_exc())
+            raise Exception(error_msg)
     
     def engineer_features(self, df):
         """Create advanced features for better predictions"""
