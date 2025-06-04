@@ -753,10 +753,46 @@ def main():
         st.header("📁 Data Upload")
         
         # Historical data upload
-        hist_file = st.file_uploader("Upload Historical Sales Data", type=['csv', 'xlsx'])
+        st.subheader("📈 Historical Sales Data")
+        hist_file = st.file_uploader(
+            "Upload Historical Sales Data", 
+            type=['csv', 'xlsx'],
+            help="Upload your historical sales data with Month and Sales columns"
+        )
+        
+        if hist_file:
+            st.success(f"✅ Uploaded: {hist_file.name}")
         
         # Actual 2024 data upload
-        actual_file = st.file_uploader("Upload Actual 2024 Data (Optional)", type=['csv', 'xlsx'])
+        st.subheader("📊 Actual 2024 Data (Optional)")
+        actual_file = st.file_uploader(
+            "Upload Actual 2024 Data (Optional)", 
+            type=['csv', 'xlsx'],
+            help="Upload actual 2024 data to calculate model accuracy"
+        )
+        
+        if actual_file:
+            st.success(f"✅ Uploaded: {actual_file.name}")
+        
+        # Data format help
+        with st.expander("📋 Data Format Guide"):
+            st.markdown("""
+            **Required columns for Historical Data:**
+            - **Month/Date**: Any column with 'month', 'date', or 'time' in the name
+            - **Sales**: Any column with 'sales', 'revenue', 'amount', or 'value' in the name
+            
+            **Optional columns for enhanced analysis:**
+            - Brand, Engine, Category (for hierarchical analysis)
+            
+            **Supported formats:**
+            - CSV (.csv)
+            - Excel (.xlsx)
+            
+            **Date formats supported:**
+            - 2023-01, 2023-01-01
+            - Jan 2023, January 2023
+            - 01/2023, 1/2023
+            """)
         
         st.header("🔧 Model Configuration")
         
@@ -787,55 +823,131 @@ def main():
             else:
                 hist_df = pd.read_excel(hist_file)
             
-            # Load actual data if provided
-            actual_2024_df = None
-            if actual_file is not None:
-                try:
-                    if actual_file.name.endswith('.csv'):
-                        actual_2024_df = pd.read_csv(actual_file)
-                    else:
-                        actual_2024_df = pd.read_excel(actual_file)
-                except Exception as e:
-                    st.error(f"Error loading actual data: {str(e)}")
+            # Debug: Show the original columns
+            st.write("**Original columns in your data:**", list(hist_df.columns))
             
-            # Data preprocessing
-            st.header("📊 Data Processing & Analysis")
-            
-            # Process historical data
+            # Data preprocessing with flexible column detection
             hist_df.columns = hist_df.columns.str.strip()
-            hist_df['Month'] = pd.to_datetime(hist_df['Month'])
+            
+            # Try to find the date/month column
+            date_col = None
+            sales_col = None
+            
+            # Look for date column (various possible names)
+            for col in hist_df.columns:
+                col_lower = col.lower()
+                if any(keyword in col_lower for keyword in ['month', 'date', 'time', 'period']):
+                    date_col = col
+                    break
+            
+            # Look for sales column
+            for col in hist_df.columns:
+                col_lower = col.lower()
+                if any(keyword in col_lower for keyword in ['sales', 'revenue', 'amount', 'value', 'qty', 'quantity']):
+                    sales_col = col
+                    break
+            
+            if date_col is None:
+                st.error("❌ Could not find a date/month column. Please ensure your data has a column with 'Month', 'Date', or 'Time' in the name.")
+                st.info("Your columns: " + ", ".join(hist_df.columns))
+                return
+            
+            if sales_col is None:
+                st.error("❌ Could not find a sales column. Please ensure your data has a column with 'Sales', 'Revenue', or 'Amount' in the name.")
+                st.info("Your columns: " + ", ".join(hist_df.columns))
+                return
+            
+            # Rename columns to standard names
+            hist_df = hist_df.rename(columns={date_col: 'Month', sales_col: 'Sales'})
+            
+            # Try to convert Month column to datetime
+            try:
+                hist_df['Month'] = pd.to_datetime(hist_df['Month'])
+                st.success(f"✅ Successfully detected Month column: '{date_col}' and Sales column: '{sales_col}'")
+            except Exception as e:
+                st.error(f"❌ Could not convert '{date_col}' to dates. Error: {str(e)}")
+                st.info("Please ensure your date column is in a format like: 2023-01, 2023-01-01, Jan 2023, etc.")
+                return
+            
             hist_df = hist_df.sort_values('Month')
             
-            # Calculate hierarchical features
-            if len(hist_df.columns) >= 4:  # Assuming Brand, Engine, Sales columns exist
-                brands_per_month = hist_df.groupby('Month').nunique().iloc[:, 1] if len(hist_df.columns) > 2 else 1
-                engines_per_month = hist_df.groupby('Month').nunique().iloc[:, 2] if len(hist_df.columns) > 3 else 1
+            # Calculate hierarchical features based on available columns
+            remaining_cols = [col for col in hist_df.columns if col not in ['Month', 'Sales']]
+            
+            if len(remaining_cols) >= 2:  # Has additional categorical columns
+                # Assume first additional column is Brand, second is Engine/Category
+                brand_col = remaining_cols[0]
+                engine_col = remaining_cols[1] if len(remaining_cols) > 1 else remaining_cols[0]
                 
-                monthly_sales = hist_df.groupby('Month')['Sales'].sum().reset_index()
-                monthly_sales['Brand_Diversity'] = brands_per_month.values
-                monthly_sales['Engine_Diversity'] = engines_per_month.values
+                st.info(f"📊 Detected hierarchical columns: Brand = '{brand_col}', Category = '{engine_col}'")
                 
-                # Market concentration (top brand share)
-                if len(hist_df.columns) > 2:
-                    brand_col = hist_df.columns[1]  # Assuming second column is brand
-                    top_brand_share = hist_df.groupby('Month').apply(
-                        lambda x: x.groupby(brand_col)['Sales'].sum().max() / x['Sales'].sum()
-                    ).reset_index(name='Top_Brand_Share')
-                    monthly_sales = monthly_sales.merge(top_brand_share, on='Month')
-                else:
-                    monthly_sales['Top_Brand_Share'] = 1.0
+                # Group by month and calculate diversity metrics
+                monthly_stats = []
+                for month in hist_df['Month'].unique():
+                    month_data = hist_df[hist_df['Month'] == month]
+                    
+                    total_sales = month_data['Sales'].sum()
+                    brand_diversity = month_data[brand_col].nunique()
+                    engine_diversity = month_data[engine_col].nunique()
+                    
+                    # Calculate top brand share
+                    if len(month_data) > 0:
+                        brand_sales = month_data.groupby(brand_col)['Sales'].sum()
+                        top_brand_share = brand_sales.max() / total_sales if total_sales > 0 else 1.0
+                    else:
+                        top_brand_share = 1.0
+                    
+                    monthly_stats.append({
+                        'Month': month,
+                        'Sales': total_sales,
+                        'Brand_Diversity': brand_diversity,
+                        'Engine_Diversity': engine_diversity,
+                        'Top_Brand_Share': top_brand_share,
+                        'Product_Diversity_Index': brand_diversity * engine_diversity
+                    })
                 
-                # Product diversity index
-                monthly_sales['Product_Diversity_Index'] = monthly_sales['Brand_Diversity'] * monthly_sales['Engine_Diversity']
+                hist_df = pd.DataFrame(monthly_stats)
                 
-                hist_df = monthly_sales
-            else:
-                # Fallback for simple data
+            elif len(remaining_cols) == 1:  # Has one additional categorical column
+                category_col = remaining_cols[0]
+                st.info(f"📊 Detected category column: '{category_col}'")
+                
+                # Group by month and calculate single category diversity
+                monthly_stats = []
+                for month in hist_df['Month'].unique():
+                    month_data = hist_df[hist_df['Month'] == month]
+                    
+                    total_sales = month_data['Sales'].sum()
+                    category_diversity = month_data[category_col].nunique()
+                    
+                    # Calculate top category share
+                    if len(month_data) > 0:
+                        category_sales = month_data.groupby(category_col)['Sales'].sum()
+                        top_category_share = category_sales.max() / total_sales if total_sales > 0 else 1.0
+                    else:
+                        top_category_share = 1.0
+                    
+                    monthly_stats.append({
+                        'Month': month,
+                        'Sales': total_sales,
+                        'Brand_Diversity': category_diversity,
+                        'Engine_Diversity': 1,  # Default value
+                        'Top_Brand_Share': top_category_share,
+                        'Product_Diversity_Index': category_diversity
+                    })
+                
+                hist_df = pd.DataFrame(monthly_stats)
+                
+            else:  # No additional categorical columns - simple time series
+                st.info("📊 Simple time series data detected - using basic aggregation")
+                
+                # Group by month for simple time series
                 monthly_sales = hist_df.groupby('Month')['Sales'].sum().reset_index()
                 monthly_sales['Brand_Diversity'] = 1
                 monthly_sales['Engine_Diversity'] = 1
                 monthly_sales['Top_Brand_Share'] = 1.0
                 monthly_sales['Product_Diversity_Index'] = 1
+                
                 hist_df = monthly_sales
             
             # Apply enhanced preprocessing
