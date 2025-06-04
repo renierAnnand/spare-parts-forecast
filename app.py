@@ -781,16 +781,23 @@ def enhanced_preprocessing(df):
     if abs(skewness) > 1 and df['Sales'].min() > 0:  # All positive values
         try:
             # Try Box-Cox transformation
-            from scipy.stats import boxcox
-            transformed_data, lambda_param = boxcox(df['Sales'])
-            if abs(stats.skew(transformed_data)) < abs(skewness):
-                st.info(f"📈 Applied Box-Cox transformation (λ={lambda_param:.3f}) to reduce skewness from {skewness:.2f}")
-                df['Sales'] = transformed_data
-                df['log_transformed'] = False
-                df['boxcox_transformed'] = True
-                df['boxcox_lambda'] = lambda_param
-            else:
-                # Fallback to log transformation
+            try:
+                from scipy.stats import boxcox
+                transformed_data, lambda_param = boxcox(df['Sales'])
+                if abs(stats.skew(transformed_data)) < abs(skewness):
+                    st.info(f"📈 Applied Box-Cox transformation (λ={lambda_param:.3f}) to reduce skewness from {skewness:.2f}")
+                    df['Sales'] = transformed_data
+                    df['log_transformed'] = False
+                    df['boxcox_transformed'] = True
+                    df['boxcox_lambda'] = lambda_param
+                else:
+                    # Fallback to log transformation
+                    st.info(f"📈 Data skewness detected ({skewness:.2f}). Applying log transformation for better modeling.")
+                    df['Sales'] = np.log1p(df['Sales'])
+                    df['log_transformed'] = True
+                    df['boxcox_transformed'] = False
+            except ImportError:
+                # Fallback to log transformation if scipy not available
                 st.info(f"📈 Data skewness detected ({skewness:.2f}). Applying log transformation for better modeling.")
                 df['Sales'] = np.log1p(df['Sales'])
                 df['log_transformed'] = True
@@ -906,11 +913,16 @@ def enhanced_preprocessing(df):
     # Advanced cyclical features
     if len(df) >= 36:  # Need enough data for cycle detection
         try:
-            # Detect business cycles using HP filter
-            from statsmodels.tsa.filters.hp_filter import hpfilter
-            cycle, trend = hpfilter(df['Sales'], lamb=1600)  # Standard lambda for monthly data
-            df['Business_Cycle'] = cycle
-            df['Long_Term_Trend'] = trend
+            # Detect business cycles using HP filter if available
+            try:
+                from statsmodels.tsa.filters.hp_filter import hpfilter
+                cycle, trend = hpfilter(df['Sales'], lamb=1600)  # Standard lambda for monthly data
+                df['Business_Cycle'] = cycle
+                df['Long_Term_Trend'] = trend
+            except ImportError:
+                # Fallback if HP filter not available
+                df['Business_Cycle'] = 0
+                df['Long_Term_Trend'] = df['Sales'].rolling(12, min_periods=1).mean()
         except:
             df['Business_Cycle'] = 0
             df['Long_Term_Trend'] = df['Sales']
@@ -1345,8 +1357,13 @@ def run_advanced_xgb_forecast(data, forecast_periods=12, scaling_factor=1.0):
         
         # Reverse transformations
         if boxcox_transformed and boxcox_lambda is not None:
-            from scipy.special import inv_boxcox
-            forecasts = inv_boxcox(forecasts, boxcox_lambda)
+            try:
+                from scipy.special import inv_boxcox
+                forecasts = inv_boxcox(forecasts, boxcox_lambda)
+            except ImportError:
+                # Fallback if scipy.special not available
+                if log_transformed:
+                    forecasts = np.expm1(forecasts)
         elif log_transformed:
             forecasts = np.expm1(forecasts)
         
@@ -1363,7 +1380,7 @@ def run_advanced_xgb_forecast(data, forecast_periods=12, scaling_factor=1.0):
         
     except Exception as e:
         st.warning(f"Advanced XGBoost failed: {str(e)}. Using enhanced pattern forecast.")
-        return run_enhanced_pattern_forecast(data, forecast_periods, scaling_factor), np.inf
+        return run_enhanced_pattern_forecast(data, forecast_periods, scaling_factor), float('inf')
 
 
 def run_enhanced_pattern_forecast(data, forecast_periods=12, scaling_factor=1.0):
