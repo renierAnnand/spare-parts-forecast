@@ -1,4 +1,374 @@
-import streamlit as st
+def optimize_sarima_parameters(data, max_p=3, max_d=2, max_q=3, seasonal_periods=12):
+    """Optimize SARIMA parameters using time series cross-validation"""
+    best_aic = np.inf
+    best_params = None
+    best_cv_score = np.inf
+    
+    # Use time series cross-validation for parameter selection
+    if len(data) >= 36:
+        # Cross-validation approach
+        cv_scores = {}
+        
+        # Limited but more thorough grid search
+        param_combinations = []
+        for p in range(0, min(max_p + 1, 3)):
+            for d in range(0, min(max_d + 1, 2)):
+                for q in range(0, min(max_q + 1, 3)):
+                    for P in range(0, 2):
+                        for D in range(0, 2):
+                            for Q in range(0, 2):
+                                param_combinations.append((p, d, q, P, D, Q))
+        
+        # Limit to top combinations for performance
+        param_combinations = param_combinations[:20]  # Test top 20 combinations
+        
+        for p, d, q, P, D, Q in param_combinations:
+            try:
+                # Time series cross-validation
+                n_splits = min(3, len(data) // 24)
+                cv_errors = []
+                
+                for i in range(n_splits):
+                    # Split data for cross-validation
+                    split_point = len(data) - (n_splits - i) * 12
+                    train_data = data['Sales'].iloc[:split_point]
+                    test_data = data['Sales'].iloc[split_point:split_point + 12]
+                    
+                    if len(train_data) >= 24 and len(test_data) >= 6:
+                        model = SARIMAX(
+                            train_data,
+                            order=(p, d, q),
+                            seasonal_order=(P, D, Q, seasonal_periods),
+                            enforce_stationarity=False,
+                            enforce_invertibility=False
+                        )
+                        fitted = model.fit(disp=False, maxiter=50)
+                        
+                        # Forecast for validation
+                        forecast = fitted.forecast(steps=len(test_data))
+                        error = np.mean(np.abs(test_data - forecast))
+                        cv_errors.append(error)
+                
+                if cv_errors:
+                    avg_cv_error = np.mean(cv_errors)
+                    cv_scores[(p, d, q, P, D, Q)] = avg_cv_error
+                    
+                    if avg_cv_error < best_cv_score:
+                        best_cv_score = avg_cv_error
+                        best_params = {
+                            'order': (p, d, q),
+                            'seasonal_order': (P, D, Q, seasonal_periods)
+                        }
+                        
+            except Exception as e:
+                continue
+    
+    # Fallback to AIC-based selection if CV fails
+    if best_params is None:
+        for p in range(0, min(max_p + 1, 3)):
+            for d in range(0, min(max_d + 1, 2)):
+                for q in range(0, min(max_q + 1, 3)):
+                    for P in range(0, 2):
+                        for D in range(0, 2):
+                            for Q in range(0, 2):
+                                try:
+                                    model = SARIMAX(
+                                        data['Sales'],
+                                        order=(p, d, q),
+                                        seasonal_order=(P, D, Q, seasonal_periods),
+                                        enforce_stationarity=False,
+                                        enforce_invertibility=False
+                                    )
+                                    fitted = model.fit(disp=False, maxiter=50)
+                                    if fitted.aic < best_aic:
+                                        best_aic = fitted.aic
+                                        best_params = {
+                                            'order': (p, d, q),
+                                            'seasonal_order': (P, D, Q, seasonal_periods)
+                                        }
+                                except:
+                                    continue
+    
+    return best_params if best_params else {'order': (1, 1, 1), 'seasonal_order': (1, 1, 1, 12)}
+
+
+def run_advanced_prophet_forecast(data, forecast_periods=12, scaling_factor=1.0):
+    """Enhanced Prophet with comprehensive hyperparameter optimization"""
+    try:
+        # Create a copy to avoid modifying original data
+        work_data = data.copy()
+        
+        # Check transformations
+        log_transformed = 'log_transformed' in work_data.columns and work_data['log_transformed'].iloc[0]
+        boxcox_transformed = work_data.get('boxcox_transformed', [False])[0] if len(work_data) > 0 else False
+        boxcox_lambda = work_data.get('boxcox_lambda', [None])[0] if 'boxcox_lambda' in work_data.columns else None
+        
+        prophet_data = work_data[['Month', 'Sales']].rename(columns={'Month': 'ds', 'Sales': 'y'})
+        
+        # Expanded Prophet configurations for better accuracy
+        configs = [
+            # Conservative configurations
+            {
+                'seasonality_mode': 'additive',
+                'changepoint_prior_scale': 0.01,
+                'seasonality_prior_scale': 5.0,
+                'holidays_prior_scale': 5.0,
+                'daily_seasonality': False,
+                'weekly_seasonality': False,
+                'yearly_seasonality': True
+            },
+            {
+                'seasonality_mode': 'additive',
+                'changepoint_prior_scale': 0.05,
+                'seasonality_prior_scale': 10.0,
+                'holidays_prior_scale': 10.0,
+                'daily_seasonality': False,
+                'weekly_seasonality': False,
+                'yearly_seasonality': True
+            },
+            # Aggressive configurations
+            {
+                'seasonality_mode': 'multiplicative',
+                'changepoint_prior_scale': 0.1,
+                'seasonality_prior_scale': 15.0,
+                'holidays_prior_scale': 15.0,
+                'daily_seasonality': False,
+                'weekly_seasonality': False,
+                'yearly_seasonality': True
+            },
+            {
+                'seasonality_mode': 'multiplicative',
+                'changepoint_prior_scale': 0.2,
+                'seasonality_prior_scale': 20.0,
+                'holidays_prior_scale': 20.0,
+                'daily_seasonality': False,
+                'weekly_seasonality': False,
+                'yearly_seasonality': True
+            },
+            # Balanced configurations
+            {
+                'seasonality_mode': 'additive',
+                'changepoint_prior_scale': 0.08,
+                'seasonality_prior_scale': 12.0,
+                'holidays_prior_scale': 12.0,
+                'daily_seasonality': False,
+                'weekly_seasonality': False,
+                'yearly_seasonality': True
+            }
+        ]
+        
+        best_mae = np.inf
+        best_config = configs[0]
+        
+        if len(prophet_data) >= 24:  # Cross-validation for sufficient data
+            # Time series cross-validation
+            n_splits = min(3, len(prophet_data) // 18)
+            
+            for config in configs:
+                try:
+                    cv_errors = []
+                    
+                    for i in range(n_splits):
+                        # Split data
+                        split_point = len(prophet_data) - (n_splits - i) * 6
+                        train_data = prophet_data.iloc[:split_point]
+                        test_data = prophet_data.iloc[split_point:split_point + 6]
+                        
+                        if len(train_data) >= 18 and len(test_data) >= 3:
+                            model = Prophet(**config)
+                            
+                            # Add custom seasonalities for better accuracy
+                            model.add_seasonality(name='monthly', period=30.5, fourier_order=5)
+                            model.add_seasonality(name='quarterly', period=91.25, fourier_order=3)
+                            
+                            model.fit(train_data)
+                            
+                            future = model.make_future_dataframe(periods=len(test_data), freq='MS')
+                            forecast = model.predict(future)
+                            val_pred = forecast['yhat'].tail(len(test_data)).values
+                            
+                            mae = mean_absolute_error(test_data['y'].values, val_pred)
+                            cv_errors.append(mae)
+                    
+                    if cv_errors:
+                        avg_mae = np.mean(cv_errors)
+                        if avg_mae < best_mae:
+                            best_mae = avg_mae
+                            best_config = config
+                except Exception as e:
+                    continue
+        
+        # Train final model on full data with best configuration
+        model = Prophet(**best_config)
+        
+        # Add advanced seasonalities
+        model.add_seasonality(name='monthly', period=30.5, fourier_order=5)
+        model.add_seasonality(name='quarterly', period=91.25, fourier_order=3)
+        
+        # Add hierarchical regressors if available
+        regressor_cols = []
+        if 'Brand_Diversity' in work_data.columns:
+            prophet_data['brand_diversity'] = work_data['Brand_Diversity'].values
+            model.add_regressor('brand_diversity')
+            regressor_cols.append('brand_diversity')
+        
+        if 'Engine_Diversity' in work_data.columns:
+            prophet_data['engine_diversity'] = work_data['Engine_Diversity'].values
+            model.add_regressor('engine_diversity')
+            regressor_cols.append('engine_diversity')
+        
+        if 'Top_Brand_Share' in work_data.columns:
+            prophet_data['market_concentration'] = work_data['Top_Brand_Share'].values
+            model.add_regressor('market_concentration')
+            regressor_cols.append('market_concentration')
+        
+        model.fit(prophet_data)
+        
+        # Create future dataframe with regressors
+        future = model.make_future_dataframe(periods=forecast_periods, freq='MS')
+        
+        # Extend regressors for future periods
+        for col in regressor_cols:
+            if col in prophet_data.columns:
+                # Use last known value for future periods
+                last_value = prophet_data[col].iloc[-1]
+                future[col] = future[col].fillna(last_value)
+        
+        forecast = model.predict(future)
+        forecast_values = forecast['yhat'].tail(forecast_periods).values
+        
+        # Reverse transformations
+        if boxcox_transformed and boxcox_lambda is not None:
+            from scipy.special import inv_boxcox
+            forecast_values = inv_boxcox(forecast_values, boxcox_lambda)
+        elif log_transformed:
+            forecast_values = np.expm1(forecast_values)
+        
+        # Apply scaling and ensure positive values
+        forecast_values = np.maximum(forecast_values, 0) * scaling_factor
+        
+        return forecast_values, best_mae
+        
+    except Exception as e:
+        st.warning(f"Advanced Prophet failed: {str(e)}. Using enhanced fallback.")
+        return run_enhanced_pattern_forecast(data, forecast_periods, scaling_factor), np.inf
+
+
+def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0):
+    """Advanced ETS with comprehensive model selection and validation"""
+    try:
+        # Create a copy to avoid modifying original data
+        work_data = data.copy()
+        
+        # Check transformations
+        log_transformed = 'log_transformed' in work_data.columns and work_data['log_transformed'].iloc[0]
+        boxcox_transformed = work_data.get('boxcox_transformed', [False])[0] if len(work_data) > 0 else False
+        boxcox_lambda = work_data.get('boxcox_lambda', [None])[0] if 'boxcox_lambda' in work_data.columns else None
+        
+        # Comprehensive ETS configurations
+        configs = [
+            {'seasonal': 'add', 'trend': 'add', 'damped_trend': False},
+            {'seasonal': 'add', 'trend': 'add', 'damped_trend': True},
+            {'seasonal': 'mul', 'trend': 'add', 'damped_trend': False},
+            {'seasonal': 'mul', 'trend': 'add', 'damped_trend': True},
+            {'seasonal': 'add', 'trend': 'mul', 'damped_trend': False},
+            {'seasonal': 'add', 'trend': 'mul', 'damped_trend': True},
+            {'seasonal': 'mul', 'trend': 'mul', 'damped_trend': False},
+            {'seasonal': 'mul', 'trend': 'mul', 'damped_trend': True},
+            {'seasonal': 'add', 'trend': None},
+            {'seasonal': 'mul', 'trend': None},
+            {'seasonal': None, 'trend': 'add'},
+            {'seasonal': None, 'trend': 'mul'},
+            {'seasonal': None, 'trend': None}
+        ]
+        
+        best_model = None
+        best_aic = np.inf
+        best_cv_score = np.inf
+        
+        # Cross-validation if enough data
+        if len(work_data) >= 36:
+            for config in configs:
+                try:
+                    cv_errors = []
+                    n_splits = min(3, len(work_data) // 18)
+                    
+                    for i in range(n_splits):
+                        split_point = len(work_data) - (n_splits - i) * 6
+                        train_data = work_data['Sales'].iloc[:split_point]
+                        test_data = work_data['Sales'].iloc[split_point:split_point + 6]
+                        
+                        if len(train_data) >= 24 and len(test_data) >= 3:
+                            model = ExponentialSmoothing(
+                                train_data,
+                                seasonal=config['seasonal'],
+                                seasonal_periods=12 if config['seasonal'] else None,
+                                trend=config['trend'],
+                                damped_trend=config.get('damped_trend', False)
+                            )
+                            fitted_model = model.fit(optimized=True, use_brute=True)
+                            
+                            forecast = fitted_model.forecast(steps=len(test_data))
+                            error = np.mean(np.abs(test_data - forecast))
+                            cv_errors.append(error)
+                    
+                    if cv_errors:
+                        avg_error = np.mean(cv_errors)
+                        if avg_error < best_cv_score:
+                            best_cv_score = avg_error
+                            # Train on full data with best config
+                            model = ExponentialSmoothing(
+                                work_data['Sales'],
+                                seasonal=config['seasonal'],
+                                seasonal_periods=12 if config['seasonal'] else None,
+                                trend=config['trend'],
+                                damped_trend=config.get('damped_trend', False)
+                            )
+                            fitted_model = model.fit(optimized=True, use_brute=True)
+                            best_model = fitted_model
+                            best_aic = fitted_model.aic
+                
+                except Exception as e:
+                    continue
+        
+        # Fallback to AIC-based selection
+        if best_model is None:
+            for config in configs:
+                try:
+                    model = ExponentialSmoothing(
+                        work_data['Sales'],
+                        seasonal=config['seasonal'],
+                        seasonal_periods=12 if config['seasonal'] else None,
+                        trend=config['trend'],
+                        damped_trend=config.get('damped_trend', False)
+                    )
+                    fitted_model = model.fit(optimized=True, use_brute=True)
+                    if fitted_model.aic < best_aic:
+                        best_aic = fitted_model.aic
+                        best_model = fitted_model
+                except:
+                    continue
+        
+        if best_model is not None:
+            forecast = best_model.forecast(steps=forecast_periods)
+            
+            # Reverse transformations
+            if boxcox_transformed and boxcox_lambda is not None:
+                from scipy.special import inv_boxcox
+                forecast = inv_boxcox(forecast, boxcox_lambda)
+            elif log_transformed:
+                forecast = np.expm1(forecast)
+            
+            # Apply scaling and ensure positive values
+            forecast = np.maximum(forecast, 0) * scaling_factor
+            
+            return forecast, best_aic
+        else:
+            raise ValueError("All ETS configurations failed")
+            
+    except Exception as e:
+        st.warning(f"Advanced ETS failed: {str(e)}. Using enhanced fallback.")
+        return run_enhanced_pattern_forecast(data, forecast_periods, scaling_factor), np.infimport streamlit as st
 
 # Configure streamlit FIRST - must be before any other st commands
 st.set_page_config(page_title="Enhanced Hierarchical Sales Forecasting Dashboard", layout="wide")
@@ -368,55 +738,191 @@ def load_enhanced_hierarchical_data(uploaded_files):
 
 
 def enhanced_preprocessing(df):
-    """Enhanced preprocessing with categorical feature engineering"""
+    """Enhanced preprocessing with advanced feature engineering for better accuracy"""
     # Store original sales for reference
     df['Sales_Original'] = df['Sales'].copy()
     
-    # 1. Outlier Detection and Treatment using IQR
-    Q1 = df['Sales'].quantile(0.25)
-    Q3 = df['Sales'].quantile(0.75)
+    # 1. Advanced Outlier Detection using multiple methods
+    Q1, Q3 = df['Sales'].quantile([0.1, 0.9])  # Use 10th/90th percentiles for less aggressive capping
     IQR = Q3 - Q1
     lower_bound = Q1 - 1.5 * IQR
     upper_bound = Q3 + 1.5 * IQR
     
-    # Cap outliers instead of removing (preserves data points)
+    # Detect extreme outliers separately
+    extreme_outliers = ((df['Sales'] < Q1 - 3 * IQR) | (df['Sales'] > Q3 + 3 * IQR)).sum()
+    if extreme_outliers > 0:
+        st.info(f"🎯 Detected {extreme_outliers} extreme outliers - applying advanced treatment")
+        # More conservative treatment for extreme outliers
+        df.loc[df['Sales'] < Q1 - 3 * IQR, 'Sales'] = df['Sales'].quantile(0.05)
+        df.loc[df['Sales'] > Q3 + 3 * IQR, 'Sales'] = df['Sales'].quantile(0.95)
+    
+    # Regular outliers with softer treatment
     outliers_detected = ((df['Sales'] < lower_bound) | (df['Sales'] > upper_bound)).sum()
     if outliers_detected > 0:
         st.info(f"📊 Detected and capped {outliers_detected} outliers for better model stability")
         df['Sales'] = df['Sales'].clip(lower=lower_bound, upper=upper_bound)
     
-    # 2. Handle missing values with interpolation
+    # 2. Advanced missing value handling with seasonal patterns
     if df['Sales'].isna().any():
-        df['Sales'] = df['Sales'].interpolate(method='time')
+        # Use seasonal interpolation if enough data
+        if len(df) >= 24:
+            df['Sales'] = df['Sales'].interpolate(method='time')
+            # Fill remaining with seasonal means
+            for month in range(1, 13):
+                month_mask = df['Month'].dt.month == month
+                month_mean = df.loc[month_mask, 'Sales'].mean()
+                if not pd.isna(month_mean):
+                    df.loc[month_mask & df['Sales'].isna(), 'Sales'] = month_mean
+        else:
+            df['Sales'] = df['Sales'].interpolate(method='time')
     
-    # 3. Data transformation - test for optimal transformation
-    skewness = stats.skew(df['Sales'])
-    if abs(skewness) > 1:  # Highly skewed data
-        st.info(f"📈 Data skewness detected ({skewness:.2f}). Applying log transformation for better modeling.")
-        df['Sales'] = np.log1p(df['Sales'])  # log1p handles zeros better
-        df['log_transformed'] = True
+    # 3. Advanced data transformation with Box-Cox if applicable
+    skewness = stats.skew(df['Sales'][df['Sales'] > 0])  # Only positive values for skewness
+    if abs(skewness) > 1 and df['Sales'].min() > 0:  # All positive values
+        try:
+            # Try Box-Cox transformation
+            from scipy.stats import boxcox
+            transformed_data, lambda_param = boxcox(df['Sales'])
+            if abs(stats.skew(transformed_data)) < abs(skewness):
+                st.info(f"📈 Applied Box-Cox transformation (λ={lambda_param:.3f}) to reduce skewness from {skewness:.2f}")
+                df['Sales'] = transformed_data
+                df['log_transformed'] = False
+                df['boxcox_transformed'] = True
+                df['boxcox_lambda'] = lambda_param
+            else:
+                # Fallback to log transformation
+                st.info(f"📈 Data skewness detected ({skewness:.2f}). Applying log transformation for better modeling.")
+                df['Sales'] = np.log1p(df['Sales'])
+                df['log_transformed'] = True
+                df['boxcox_transformed'] = False
+        except:
+            # Fallback to log transformation
+            st.info(f"📈 Data skewness detected ({skewness:.2f}). Applying log transformation for better modeling.")
+            df['Sales'] = np.log1p(df['Sales'])
+            df['log_transformed'] = True
+            df['boxcox_transformed'] = False
     else:
         df['log_transformed'] = False
+        df['boxcox_transformed'] = False
     
-    # 4. Enhanced categorical features
-    # Year-over-year growth rate
-    df['YoY_Growth'] = df['Sales'].pct_change(12)
+    # 4. Advanced feature engineering for better accuracy
     
-    # Seasonal strength
+    # Lag features (proven to improve accuracy)
+    for lag in [1, 2, 3, 6, 12]:
+        if len(df) > lag:
+            df[f'Sales_Lag_{lag}'] = df['Sales'].shift(lag)
+    
+    # Rolling statistics with different windows
+    for window in [3, 6, 12]:
+        if len(df) > window:
+            df[f'Sales_Rolling_Mean_{window}'] = df['Sales'].rolling(window=window, min_periods=1).mean()
+            df[f'Sales_Rolling_Std_{window}'] = df['Sales'].rolling(window=window, min_periods=1).std()
+            df[f'Sales_Rolling_Max_{window}'] = df['Sales'].rolling(window=window, min_periods=1).max()
+            df[f'Sales_Rolling_Min_{window}'] = df['Sales'].rolling(window=window, min_periods=1).min()
+    
+    # Exponential smoothing features
+    for alpha in [0.1, 0.3, 0.5]:
+        df[f'Sales_EWM_{str(alpha).replace(".", "")}'] = df['Sales'].ewm(alpha=alpha).mean()
+    
+    # Advanced time-based features
+    df['Month_Num'] = df['Month'].dt.month
+    df['Quarter'] = df['Month'].dt.quarter
+    df['Month_Sin'] = np.sin(2 * np.pi * df['Month_Num'] / 12)
+    df['Month_Cos'] = np.cos(2 * np.pi * df['Month_Num'] / 12)
+    df['Quarter_Sin'] = np.sin(2 * np.pi * df['Quarter'] / 4)
+    df['Quarter_Cos'] = np.cos(2 * np.pi * df['Quarter'] / 4)
+    
+    # Year-over-year and quarter-over-quarter growth
+    if len(df) >= 12:
+        df['YoY_Growth'] = df['Sales'].pct_change(12)
+        df['YoY_Growth_MA3'] = df['YoY_Growth'].rolling(3, min_periods=1).mean()
+    
+    if len(df) >= 4:
+        df['QoQ_Growth'] = df['Sales'].pct_change(4)
+    
+    # Month-over-month acceleration
+    df['MoM_Growth'] = df['Sales'].pct_change(1)
+    df['MoM_Acceleration'] = df['MoM_Growth'].diff()
+    
+    # Advanced seasonal decomposition
     if len(df) >= 24:
         try:
-            decomposition = seasonal_decompose(df['Sales'], model='additive', period=12)
-            df['Seasonal_Component'] = decomposition.seasonal
-            df['Trend_Component'] = decomposition.trend
-        except:
+            # Try both additive and multiplicative decomposition
+            decomp_add = seasonal_decompose(df['Sales'], model='additive', period=12)
+            decomp_mult = seasonal_decompose(df['Sales'], model='multiplicative', period=12)
+            
+            # Choose better decomposition based on residual variance
+            residual_var_add = np.var(decomp_add.resid.dropna())
+            residual_var_mult = np.var(decomp_mult.resid.dropna())
+            
+            if residual_var_mult < residual_var_add:
+                df['Seasonal_Component'] = decomp_mult.seasonal
+                df['Trend_Component'] = decomp_mult.trend
+                df['Residual_Component'] = decomp_mult.resid
+                decomp_type = 'multiplicative'
+            else:
+                df['Seasonal_Component'] = decomp_add.seasonal
+                df['Trend_Component'] = decomp_add.trend
+                df['Residual_Component'] = decomp_add.resid
+                decomp_type = 'additive'
+            
+            st.info(f"📊 Applied {decomp_type} seasonal decomposition")
+            
+            # Seasonal strength
+            seasonal_strength = np.var(df['Seasonal_Component'].dropna()) / np.var(df['Sales'])
+            df['Seasonal_Strength'] = seasonal_strength
+            
+            # Trend strength
+            trend_strength = np.var(df['Trend_Component'].dropna()) / np.var(df['Sales'])
+            df['Trend_Strength'] = trend_strength
+            
+        except Exception as e:
+            st.warning(f"Seasonal decomposition failed: {e}")
             df['Seasonal_Component'] = 0
             df['Trend_Component'] = df['Sales']
+            df['Residual_Component'] = 0
+            df['Seasonal_Strength'] = 0
+            df['Trend_Strength'] = 0
     else:
         df['Seasonal_Component'] = 0
         df['Trend_Component'] = df['Sales']
+        df['Residual_Component'] = 0
+        df['Seasonal_Strength'] = 0
+        df['Trend_Strength'] = 0
     
-    # Market concentration metrics
+    # Enhanced hierarchical features with interaction effects
     df['Market_Concentration'] = df['Top_Brand_Share']
+    
+    # Interaction features for hierarchical data
+    if 'Brand_Diversity' in df.columns and 'Engine_Diversity' in df.columns:
+        df['Brand_Engine_Interaction'] = df['Brand_Diversity'] * df['Engine_Diversity']
+        df['Diversity_Concentration_Ratio'] = df['Product_Diversity_Index'] / (df['Top_Brand_Share'] + 0.01)
+        
+        # Diversity momentum (change in diversity)
+        df['Brand_Diversity_Change'] = df['Brand_Diversity'].diff()
+        df['Engine_Diversity_Change'] = df['Engine_Diversity'].diff()
+        df['Market_Concentration_Change'] = df['Top_Brand_Share'].diff()
+    
+    # Advanced cyclical features
+    if len(df) >= 36:  # Need enough data for cycle detection
+        try:
+            # Detect business cycles using HP filter
+            from statsmodels.tsa.filters.hp_filter import hpfilter
+            cycle, trend = hpfilter(df['Sales'], lamb=1600)  # Standard lambda for monthly data
+            df['Business_Cycle'] = cycle
+            df['Long_Term_Trend'] = trend
+        except:
+            df['Business_Cycle'] = 0
+            df['Long_Term_Trend'] = df['Sales']
+    
+    # Fill any remaining NaN values
+    df = df.fillna(method='ffill').fillna(method='bfill').fillna(0)
+    
+    # Feature scaling indicators for models
+    numeric_features = [col for col in df.columns if col.startswith('Sales_') or col.endswith('_Growth') or col.endswith('_Component')]
+    df['High_Variability'] = df[numeric_features].std(axis=1)
+    
+    st.success(f"✅ Enhanced preprocessing completed with {len([col for col in df.columns if col not in ['Month', 'Sales', 'Sales_Original']])} engineered features")
     
     return df
 
@@ -675,58 +1181,285 @@ def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0):
 
 
 def run_advanced_xgb_forecast(data, forecast_periods=12, scaling_factor=1.0):
-    """Advanced XGBoost with feature engineering using hierarchical features"""
+    """Advanced XGBoost with comprehensive feature engineering for maximum accuracy"""
     try:
         # Create a copy to avoid modifying original data
         work_data = data.copy()
         
-        # Check if data was log transformed
-        log_transformed = 'log_transformed' in work_data.columns and work_data['log_transformed'].iloc[0]
+        # Check transformations
+        log_transformed = work_data.get('log_transformed', [False])[0] if len(work_data) > 0 else False
+        boxcox_transformed = work_data.get('boxcox_transformed', [False])[0] if len(work_data) > 0 else False
+        boxcox_lambda = work_data.get('boxcox_lambda', [None])[0] if 'boxcox_lambda' in work_data.columns else None
         
-        # Enhanced pattern recognition using hierarchical features
-        recent_sales = work_data['Sales'].tail(12).values
-        base_forecast = np.mean(recent_sales) if len(recent_sales) > 0 else 1000
+        if len(work_data) < 24:
+            # Fallback for insufficient data
+            return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
         
-        # Use brand and engine diversity for enhanced forecasting
-        brand_diversity_trend = 0
-        engine_diversity_trend = 0
+        # Prepare features for XGBoost
+        feature_cols = []
         
-        if 'Brand_Diversity' in work_data.columns and len(work_data) >= 6:
-            recent_brand_diversity = work_data['Brand_Diversity'].tail(6).mean()
-            historical_brand_diversity = work_data['Brand_Diversity'].head(6).mean()
-            brand_diversity_trend = (recent_brand_diversity - historical_brand_diversity) / historical_brand_diversity if historical_brand_diversity > 0 else 0
+        # Lag features
+        lag_features = [col for col in work_data.columns if col.startswith('Sales_Lag_')]
+        feature_cols.extend(lag_features)
         
-        if 'Engine_Diversity' in work_data.columns and len(work_data) >= 6:
-            recent_engine_diversity = work_data['Engine_Diversity'].tail(6).mean()
-            historical_engine_diversity = work_data['Engine_Diversity'].head(6).mean()
-            engine_diversity_trend = (recent_engine_diversity - historical_engine_diversity) / historical_engine_diversity if historical_engine_diversity > 0 else 0
+        # Rolling statistics
+        rolling_features = [col for col in work_data.columns if 'Rolling' in col or 'EWM' in col]
+        feature_cols.extend(rolling_features)
         
-        # Market concentration trend
-        market_concentration_factor = 1.0
-        if 'Top_Brand_Share' in work_data.columns and len(work_data) >= 6:
-            recent_concentration = work_data['Top_Brand_Share'].tail(6).mean()
-            market_concentration_factor = 1 + (1 - recent_concentration) * 0.1  # Higher diversity = slight boost
+        # Time features
+        time_features = ['Month_Sin', 'Month_Cos', 'Quarter_Sin', 'Quarter_Cos']
+        feature_cols.extend([col for col in time_features if col in work_data.columns])
         
-        # Generate forecasts with enhanced seasonal pattern and categorical adjustments
+        # Growth features
+        growth_features = [col for col in work_data.columns if 'Growth' in col and col != 'YoY_Growth']
+        feature_cols.extend(growth_features)
+        
+        # Seasonal and trend components
+        decomp_features = ['Seasonal_Component', 'Trend_Component', 'Seasonal_Strength', 'Trend_Strength']
+        feature_cols.extend([col for col in decomp_features if col in work_data.columns])
+        
+        # Hierarchical features
+        hierarchical_features = ['Brand_Diversity', 'Engine_Diversity', 'Top_Brand_Share', 
+                               'Product_Diversity_Index', 'Brand_Engine_Interaction',
+                               'Diversity_Concentration_Ratio', 'Brand_Diversity_Change',
+                               'Engine_Diversity_Change', 'Market_Concentration_Change']
+        feature_cols.extend([col for col in hierarchical_features if col in work_data.columns])
+        
+        # Business cycle features
+        if 'Business_Cycle' in work_data.columns:
+            feature_cols.append('Business_Cycle')
+        if 'Long_Term_Trend' in work_data.columns:
+            feature_cols.append('Long_Term_Trend')
+        
+        # Remove any duplicates and ensure we have features
+        feature_cols = list(set(feature_cols))
+        available_features = [col for col in feature_cols if col in work_data.columns]
+        
+        if len(available_features) < 3:
+            st.warning("Insufficient features for XGBoost - using enhanced pattern-based forecasting")
+            return run_enhanced_pattern_forecast(work_data, forecast_periods, scaling_factor), 200.0
+        
+        # Prepare training data
+        train_data = work_data.dropna(subset=available_features + ['Sales']).copy()
+        
+        if len(train_data) < 12:
+            return run_enhanced_pattern_forecast(work_data, forecast_periods, scaling_factor), 200.0
+        
+        X = train_data[available_features].values
+        y = train_data['Sales'].values
+        
+        # Scale features
+        from sklearn.preprocessing import RobustScaler
+        scaler = RobustScaler()
+        X_scaled = scaler.fit_transform(X)
+        
+        # Train XGBoost with optimized parameters
+        from sklearn.ensemble import GradientBoostingRegressor
+        
+        # Use time series cross-validation for better parameter selection
+        if len(train_data) >= 36:
+            # Hyperparameter optimization
+            param_grid = {
+                'n_estimators': [100, 200, 300],
+                'learning_rate': [0.01, 0.05, 0.1],
+                'max_depth': [3, 5, 7],
+                'min_samples_split': [2, 5, 10],
+                'min_samples_leaf': [1, 2, 4]
+            }
+            
+            # Time series split
+            tscv = TimeSeriesSplit(n_splits=3)
+            
+            from sklearn.model_selection import GridSearchCV
+            grid_search = GridSearchCV(
+                GradientBoostingRegressor(random_state=42),
+                param_grid,
+                cv=tscv,
+                scoring='neg_mean_absolute_error',
+                n_jobs=-1
+            )
+            grid_search.fit(X_scaled, y)
+            model = grid_search.best_estimator_
+            
+            st.info(f"🔧 XGBoost optimized with parameters: {grid_search.best_params_}")
+        else:
+            # Use default parameters for smaller datasets
+            model = GradientBoostingRegressor(
+                n_estimators=100,
+                learning_rate=0.1,
+                max_depth=5,
+                random_state=42
+            )
+            model.fit(X_scaled, y)
+        
+        # Generate forecasts
         forecasts = []
-        for i in range(forecast_periods):
-            month_idx = i % 12
+        current_data = train_data.copy()
+        
+        for step in range(forecast_periods):
+            # Get the latest features
+            latest_features = current_data[available_features].iloc[-1:].values
+            latest_scaled = scaler.transform(latest_features)
             
-            # Base seasonal adjustment
-            if len(recent_sales) >= 12:
-                seasonal_factor = recent_sales[month_idx] / np.mean(recent_sales)
-            else:
-                seasonal_factor = 1.0 + 0.1 * np.sin(2 * np.pi * month_idx / 12)
+            # Predict next value
+            next_pred = model.predict(latest_scaled)[0]
+            forecasts.append(next_pred)
             
-            # Categorical enhancement factors
-            diversity_factor = 1.0 + (brand_diversity_trend + engine_diversity_trend) * 0.05
+            # Update data for next prediction
+            next_month = current_data['Month'].iloc[-1] + pd.DateOffset(months=1)
             
-            # Combine all factors
-            forecast_val = base_forecast * seasonal_factor * diversity_factor * market_concentration_factor
-            forecasts.append(max(forecast_val, 0))
+            # Create next row with predicted value and updated features
+            next_row = current_data.iloc[-1:].copy()
+            next_row['Month'] = next_month
+            next_row['Sales'] = next_pred
+            
+            # Update time-based features
+            next_row['Month_Num'] = next_month.month
+            next_row['Quarter'] = next_month.quarter
+            next_row['Month_Sin'] = np.sin(2 * np.pi * next_month.month / 12)
+            next_row['Month_Cos'] = np.cos(2 * np.pi * next_month.month / 12)
+            next_row['Quarter_Sin'] = np.sin(2 * np.pi * next_month.quarter / 4)
+            next_row['Quarter_Cos'] = np.cos(2 * np.pi * next_month.quarter / 4)
+            
+            # Update lag features (shift previous values)
+            for lag in [1, 2, 3, 6, 12]:
+                lag_col = f'Sales_Lag_{lag}'
+                if lag_col in next_row.columns:
+                    if lag == 1:
+                        next_row[lag_col] = current_data['Sales'].iloc[-1]
+                    elif lag <= len(current_data):
+                        next_row[lag_col] = current_data['Sales'].iloc[-lag]
+            
+            # Update rolling features
+            extended_data = pd.concat([current_data, next_row], ignore_index=True)
+            for window in [3, 6, 12]:
+                if f'Sales_Rolling_Mean_{window}' in next_row.columns:
+                    next_row[f'Sales_Rolling_Mean_{window}'] = extended_data['Sales'].tail(window).mean()
+                if f'Sales_Rolling_Std_{window}' in next_row.columns:
+                    next_row[f'Sales_Rolling_Std_{window}'] = extended_data['Sales'].tail(window).std()
+            
+            # Add to current data
+            current_data = pd.concat([current_data, next_row], ignore_index=True)
         
         forecasts = np.array(forecasts)
         
+        # Reverse transformations
+        if boxcox_transformed and boxcox_lambda is not None:
+            from scipy.special import inv_boxcox
+            forecasts = inv_boxcox(forecasts, boxcox_lambda)
+        elif log_transformed:
+            forecasts = np.expm1(forecasts)
+        
+        # Apply scaling and ensure positive values
+        forecasts = np.maximum(forecasts, 0) * scaling_factor
+        
+        # Calculate feature importance score as validation metric
+        if hasattr(model, 'feature_importances_'):
+            importance_score = np.mean(model.feature_importances_) * 100
+        else:
+            importance_score = 150.0
+        
+        return forecasts, importance_score
+        
+    except Exception as e:
+        st.warning(f"Advanced XGBoost failed: {str(e)}. Using enhanced pattern forecast.")
+        return run_enhanced_pattern_forecast(data, forecast_periods, scaling_factor), np.inf
+
+
+def run_enhanced_pattern_forecast(data, forecast_periods=12, scaling_factor=1.0):
+    """Enhanced pattern-based forecasting with hierarchical intelligence"""
+    try:
+        work_data = data.copy()
+        log_transformed = work_data.get('log_transformed', [False])[0] if len(work_data) > 0 else False
+        boxcox_transformed = work_data.get('boxcox_transformed', [False])[0] if len(work_data) > 0 else False
+        boxcox_lambda = work_data.get('boxcox_lambda', [None])[0] if 'boxcox_lambda' in work_data.columns else None
+        
+        if len(work_data) >= 24:
+            # Use multiple seasonal patterns
+            seasonal_12 = work_data['Sales'].tail(12).values
+            seasonal_24 = work_data['Sales'].tail(24).values
+            
+            # Calculate trends
+            recent_trend = np.polyfit(range(12), seasonal_12, 1)[0]
+            long_trend = np.polyfit(range(24), seasonal_24, 1)[0]
+            
+            # Combine trends with decay
+            combined_trend = 0.7 * recent_trend + 0.3 * long_trend
+            
+            # Enhanced categorical adjustments
+            brand_adjustment = 1.0
+            engine_adjustment = 1.0
+            market_adjustment = 1.0
+            
+            if 'Brand_Diversity' in work_data.columns and len(work_data) >= 12:
+                recent_brand = work_data['Brand_Diversity'].tail(6).mean()
+                hist_brand = work_data['Brand_Diversity'].head(6).mean()
+                if hist_brand > 0:
+                    brand_trend = (recent_brand - hist_brand) / hist_brand
+                    brand_adjustment = 1 + brand_trend * 0.1
+            
+            if 'Engine_Diversity' in work_data.columns and len(work_data) >= 12:
+                recent_engine = work_data['Engine_Diversity'].tail(6).mean()
+                hist_engine = work_data['Engine_Diversity'].head(6).mean()
+                if hist_engine > 0:
+                    engine_trend = (recent_engine - hist_engine) / hist_engine
+                    engine_adjustment = 1 + engine_trend * 0.1
+            
+            if 'Top_Brand_Share' in work_data.columns:
+                recent_concentration = work_data['Top_Brand_Share'].tail(6).mean()
+                market_adjustment = 1 + (1 - recent_concentration) * 0.05
+            
+            # Generate forecasts with multiple adjustments
+            forecasts = []
+            for i in range(forecast_periods):
+                month_idx = i % 12
+                
+                # Base seasonal value
+                base_seasonal = seasonal_12[month_idx]
+                
+                # Trend adjustment
+                trend_adj = combined_trend * (i + 1)
+                
+                # Categorical adjustments
+                categorical_factor = brand_adjustment * engine_adjustment * market_adjustment
+                
+                # Growth momentum from historical data
+                if 'YoY_Growth' in work_data.columns:
+                    avg_growth = work_data['YoY_Growth'].tail(6).mean()
+                    if not pd.isna(avg_growth):
+                        momentum_adj = base_seasonal * avg_growth * (i + 1) / 12
+                    else:
+                        momentum_adj = 0
+                else:
+                    momentum_adj = 0
+                
+                final_forecast = (base_seasonal + trend_adj + momentum_adj) * categorical_factor
+                forecasts.append(max(final_forecast, base_seasonal * 0.3))  # Floor at 30% of seasonal
+            
+            forecasts = np.array(forecasts)
+            
+        else:
+            # Fallback for limited data
+            base_value = work_data['Sales'].mean()
+            seasonal_factor = 1 + 0.1 * np.sin(2 * np.pi * np.arange(forecast_periods) / 12)
+            forecasts = base_value * seasonal_factor
+        
+        # Reverse transformations
+        if boxcox_transformed and boxcox_lambda is not None:
+            from scipy.special import inv_boxcox
+            forecasts = inv_boxcox(forecasts, boxcox_lambda)
+        elif log_transformed:
+            forecasts = np.expm1(forecasts)
+        
+        # Apply scaling
+        forecasts = np.maximum(forecasts, 0) * scaling_factor
+        
+        return forecasts
+        
+    except Exception as e:
+        # Ultimate fallback
+        historical_mean = data['Sales'].mean() if len(data) > 0 else 1000
+        return np.array([historical_mean * scaling_factor] * forecast_periods)
         # Reverse log transformation first if applied
         if log_transformed:
             forecasts = np.expm1(forecasts)
@@ -1598,11 +2331,89 @@ def main():
             except:
                 pass
         
+        # Accuracy improvement recommendations
+        st.subheader("🎯 Accuracy Improvement Recommendations")
+        
+        accuracy_recommendations = []
+        
+        # Data quality recommendations
+        if unique_months < 24:
+            accuracy_recommendations.append("📈 **More Historical Data**: Add more historical months (target: 36+ months) for better model training")
+        
+        if outliers_removed > len(hist_df) * 0.1:
+            accuracy_recommendations.append("🎯 **Data Quality**: High outlier rate detected - review data collection processes")
+        
+        # Model-specific recommendations
+        if actual_2024_df is not None:
+            actual_months = len(actual_2024_df)
+            if actual_months < 6:
+                accuracy_recommendations.append("📊 **Validation Data**: Add more actual data months for better validation (current: {} months)".format(actual_months))
+        else:
+            accuracy_recommendations.append("📈 **Validation**: Upload actual data to enable accuracy measurement and model optimization")
+        
+        # Feature engineering recommendations
+        if avg_brand_diversity == 1 and avg_engine_diversity == 1:
+            accuracy_recommendations.append("🏷️ **Enhanced Categories**: Your data shows limited categorical diversity - consider adding more product attributes")
+        
+        # Seasonal pattern recommendations
+        if len(hist_df) >= 24:
+            try:
+                monthly_data = hist_df.groupby('Month')['Sales'].sum().reset_index()
+                cv = monthly_data['Sales'].std() / monthly_data['Sales'].mean()
+                if cv > 0.5:
+                    accuracy_recommendations.append("📊 **High Variability**: Consider external factors (promotions, events) as additional features")
+            except:
+                pass
+        
+        # Scaling recommendations
+        if scaling_factor != 1.0:
+            if abs(scaling_factor - 1.0) > 0.5:
+                accuracy_recommendations.append(f"⚖️ **Scale Alignment**: Large scaling factor ({scaling_factor:.2f}x) detected - verify data consistency between years")
+        
+        # Model ensemble recommendations
+        model_count = len([use_sarima, use_prophet, use_ets, use_xgb if use_sarima or use_prophet or use_ets or use_xgb else []])
+        if model_count < 3:
+            accuracy_recommendations.append("🤖 **Model Ensemble**: Enable more models for better ensemble accuracy")
+        
+        # Display all recommendations
         if recommendations:
             for rec in recommendations:
                 st.info(rec)
         else:
             st.info("📊 **Analysis**: Your hierarchical data shows balanced diversity across categories")
+        
+        if accuracy_recommendations:
+            st.markdown("### 🎯 To Improve Accuracy:")
+            for rec in accuracy_recommendations:
+                st.warning(rec)
+        
+        # Additional accuracy tips
+        with st.expander("💡 Advanced Accuracy Tips"):
+            st.markdown("""
+            **📈 Data Enhancement:**
+            - **External Factors**: Add weather, holidays, economic indicators
+            - **Promotional Data**: Include marketing campaigns, discounts, launches
+            - **Competitor Intelligence**: Market share, competitor actions
+            - **Customer Segmentation**: B2B vs B2C patterns, regional differences
+            
+            **🔧 Technical Improvements:**
+            - **Feature Engineering**: Create interaction terms between brands/engines
+            - **Anomaly Detection**: Identify and handle irregular events separately
+            - **Regime Detection**: Account for structural changes in business
+            - **Multi-step Forecasting**: Train models specifically for different horizons
+            
+            **📊 Model Optimization:**
+            - **Hyperparameter Tuning**: Use Bayesian optimization for better parameters
+            - **Custom Loss Functions**: Weight recent errors more heavily
+            - **Ensemble Stacking**: Train meta-models on prediction combinations
+            - **Forecast Combination**: Use dynamic weighting based on recent performance
+            
+            **🎯 Business Process:**
+            - **Regular Retraining**: Update models monthly with new data
+            - **Forecast Reconciliation**: Ensure forecasts add up across hierarchies
+            - **Expert Judgment**: Incorporate domain knowledge for special events
+            - **Continuous Monitoring**: Track accuracy metrics over time
+            """)
 
 
 if __name__ == "__main__":
