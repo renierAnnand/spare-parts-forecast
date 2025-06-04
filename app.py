@@ -37,47 +37,171 @@ class ImprovedSalesPredictionSystem:
         self.ensemble_weights = {}
         self.validation_scores = {}
         
-    def load_and_prepare_data(self, sales_2024_path, sales_2022_2023_path):
-        """Load and prepare the sales data with proper formatting"""
+    def load_and_prepare_data(self, sales_2024_file, sales_2022_2023_file):
+        """Load and prepare the sales data with proper formatting for Streamlit uploads"""
         
-        # Load 2024 data
-        df_2024 = pd.read_excel(sales_2024_path)
-        
-        # Clean 2024 data structure
-        df_2024_clean = df_2024.iloc[1:].copy()  # Skip header row
-        df_2024_clean.columns = ['part_code', 'description', 'brand', 'engine'] + \
-                               [f'2024-{i:02d}' for i in range(1, 13)]
-        
-        # Melt 2024 data to long format
-        df_2024_long = df_2024_clean.melt(
-            id_vars=['part_code', 'description', 'brand', 'engine'],
-            var_name='month',
-            value_name='sales'
-        )
-        df_2024_long['date'] = pd.to_datetime(df_2024_long['month'])
-        
-        # Load 2022-2023 historical data
-        df_hist = pd.read_excel(sales_2022_2023_path)
-        
-        # Convert Excel dates to proper datetime
-        df_hist['date'] = pd.to_datetime('1900-01-01') + pd.to_timedelta(df_hist['Month'] - 2, unit='D')
-        df_hist['date'] = df_hist['date'].dt.to_period('M').dt.start_time
-        df_hist = df_hist.rename(columns={'Part': 'part_code', 'Sales': 'sales'})
-        
-        # Combine datasets
-        combined_df = pd.concat([
-            df_hist[['part_code', 'date', 'sales']],
-            df_2024_long[['part_code', 'date', 'sales']]
-        ], ignore_index=True)
-        
-        # Add part metadata
-        part_info = df_2024_clean[['part_code', 'description', 'brand', 'engine']].drop_duplicates()
-        combined_df = combined_df.merge(part_info, on='part_code', how='left')
-        
-        # Sort by part and date
-        combined_df = combined_df.sort_values(['part_code', 'date']).reset_index(drop=True)
-        
-        return combined_df
+        try:
+            # Load 2024 data - handle both file paths and uploaded files
+            if hasattr(sales_2024_file, 'read'):  # Streamlit uploaded file
+                df_2024 = pd.read_excel(sales_2024_file)
+            else:  # File path
+                df_2024 = pd.read_excel(sales_2024_file)
+            
+            # Clean 2024 data structure
+            # First, let's inspect the actual structure
+            print("2024 file shape:", df_2024.shape)
+            print("2024 file columns:", df_2024.columns.tolist())
+            
+            # Handle the case where first row might be headers
+            if df_2024.iloc[0, 0] == 'Item Code' or 'Item Code' in str(df_2024.iloc[0, 0]):
+                df_2024_clean = df_2024.iloc[1:].copy()  # Skip header row
+                # Set proper column names
+                expected_cols = ['part_code', 'description', 'brand', 'engine'] + \
+                               [f'month_{i:02d}_2024' for i in range(1, 13)]
+                
+                # Adjust column count to match actual data
+                actual_cols = min(len(expected_cols), df_2024_clean.shape[1])
+                df_2024_clean.columns = expected_cols[:actual_cols]
+                
+            else:
+                df_2024_clean = df_2024.copy()
+                # Auto-detect columns
+                cols = df_2024_clean.columns.tolist()
+                month_cols = [col for col in cols if any(month in str(col).lower() 
+                             for month in ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
+                                         'jul', 'aug', 'sep', 'oct', 'nov', 'dec'])]
+                
+                if len(month_cols) >= 4:  # At least 4 months of data
+                    non_month_cols = [col for col in cols if col not in month_cols]
+                    new_cols = ['part_code', 'description', 'brand', 'engine'][:len(non_month_cols)] + month_cols
+                    df_2024_clean.columns = new_cols[:df_2024_clean.shape[1]]
+            
+            # Get the month columns for melting
+            month_cols = [col for col in df_2024_clean.columns if 'month_' in col or 
+                         any(month in str(col).lower() for month in ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
+                                                                    'jul', 'aug', 'sep', 'oct', 'nov', 'dec'])]
+            
+            if not month_cols:
+                # Fallback: assume last 12 columns are months
+                month_cols = df_2024_clean.columns[-12:].tolist()
+            
+            # Melt 2024 data to long format
+            id_vars = ['part_code', 'description', 'brand', 'engine']
+            available_id_vars = [col for col in id_vars if col in df_2024_clean.columns]
+            
+            df_2024_long = df_2024_clean.melt(
+                id_vars=available_id_vars,
+                value_vars=month_cols,
+                var_name='month',
+                value_name='sales'
+            )
+            
+            # Create proper dates for 2024 data
+            month_mapping = {
+                'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+                'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+            }
+            
+            def extract_month_number(month_str):
+                month_str = str(month_str).lower()
+                for month_name, month_num in month_mapping.items():
+                    if month_name in month_str:
+                        return month_num
+                # Fallback: try to extract number
+                import re
+                numbers = re.findall(r'\d+', month_str)
+                if numbers:
+                    return min(int(numbers[0]), 12)
+                return 1
+            
+            df_2024_long['month_num'] = df_2024_long['month'].apply(extract_month_number)
+            df_2024_long['date'] = pd.to_datetime('2024-' + df_2024_long['month_num'].astype(str) + '-01')
+            
+            # Load 2022-2023 historical data
+            if hasattr(sales_2022_2023_file, 'read'):  # Streamlit uploaded file
+                df_hist = pd.read_excel(sales_2022_2023_file)
+            else:  # File path
+                df_hist = pd.read_excel(sales_2022_2023_file)
+            
+            print("Historical file shape:", df_hist.shape)
+            print("Historical file columns:", df_hist.columns.tolist())
+            
+            # Handle different possible column names
+            part_col = None
+            sales_col = None
+            month_col = None
+            
+            for col in df_hist.columns:
+                col_lower = str(col).lower()
+                if 'part' in col_lower and part_col is None:
+                    part_col = col
+                elif 'sales' in col_lower and sales_col is None:
+                    sales_col = col
+                elif 'month' in col_lower or 'date' in col_lower and month_col is None:
+                    month_col = col
+            
+            # Fallback to position-based if column names not found
+            if not all([part_col, sales_col, month_col]) and df_hist.shape[1] >= 3:
+                part_col = df_hist.columns[0]
+                month_col = df_hist.columns[1] 
+                sales_col = df_hist.columns[2]
+            
+            # Clean historical data
+            df_hist_clean = df_hist[[part_col, month_col, sales_col]].copy()
+            df_hist_clean.columns = ['part_code', 'month_raw', 'sales']
+            
+            # Convert Excel dates to proper datetime
+            def convert_excel_date(date_val):
+                try:
+                    if pd.isna(date_val):
+                        return pd.NaT
+                    if isinstance(date_val, (int, float)):
+                        # Excel date number
+                        return pd.to_datetime('1900-01-01') + pd.to_timedelta(date_val - 2, unit='D')
+                    else:
+                        # Try to parse as regular date
+                        return pd.to_datetime(date_val)
+                except:
+                    return pd.NaT
+            
+            df_hist_clean['date'] = df_hist_clean['month_raw'].apply(convert_excel_date)
+            df_hist_clean = df_hist_clean.dropna(subset=['date'])
+            
+            # Ensure sales is numeric
+            df_2024_long['sales'] = pd.to_numeric(df_2024_long['sales'], errors='coerce')
+            df_hist_clean['sales'] = pd.to_numeric(df_hist_clean['sales'], errors='coerce')
+            
+            # Combine datasets
+            hist_subset = df_hist_clean[['part_code', 'date', 'sales']].copy()
+            current_subset = df_2024_long[['part_code', 'date', 'sales']].copy()
+            
+            combined_df = pd.concat([hist_subset, current_subset], ignore_index=True)
+            
+            # Add part metadata from 2024 data
+            if len(available_id_vars) > 1:
+                part_info = df_2024_clean[available_id_vars].drop_duplicates()
+                combined_df = combined_df.merge(part_info, on='part_code', how='left')
+            
+            # Fill missing metadata
+            for col in ['description', 'brand', 'engine']:
+                if col not in combined_df.columns:
+                    combined_df[col] = 'Unknown'
+                else:
+                    combined_df[col] = combined_df[col].fillna('Unknown')
+            
+            # Sort by part and date
+            combined_df = combined_df.sort_values(['part_code', 'date']).reset_index(drop=True)
+            combined_df = combined_df.dropna(subset=['sales'])  # Remove rows with missing sales
+            
+            print(f"Successfully loaded {len(combined_df)} records for {combined_df['part_code'].nunique()} parts")
+            print(f"Date range: {combined_df['date'].min()} to {combined_df['date'].max()}")
+            
+            return combined_df
+            
+        except Exception as e:
+            print(f"Error loading data: {str(e)}")
+            print("Please check your file formats and try again.")
+            raise e
     
     def engineer_features(self, df):
         """Create advanced features for better predictions"""
@@ -543,11 +667,197 @@ class ImprovedSalesPredictionSystem:
         
         return results_df
 
+# Streamlit Integration Functions
+def create_streamlit_app():
+    """Create a Streamlit app for the prediction system"""
+    import streamlit as st
+    
+    st.title("🔧 Improved Sales Prediction System")
+    st.markdown("Upload your sales data files to get started with improved predictions!")
+    
+    # File uploaders
+    st.header("📁 Upload Data Files")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        sales_2024_file = st.file_uploader(
+            "Upload 2024 Sales Data", 
+            type=['xlsx', 'xls'],
+            help="Upload your SPC Sales per part 2024.xlsx file"
+        )
+    
+    with col2:
+        sales_hist_file = st.file_uploader(
+            "Upload 2022-2023 Historical Data", 
+            type=['xlsx', 'xls'],
+            help="Upload your SPC_Sales_2022_2023_Formatted.xlsx file"
+        )
+    
+    if sales_2024_file and sales_hist_file:
+        try:
+            # Initialize predictor
+            predictor = ImprovedSalesPredictionSystem()
+            
+            # Load data with progress bar
+            with st.spinner("Loading and preparing data..."):
+                df = predictor.load_and_prepare_data(sales_2024_file, sales_hist_file)
+            
+            st.success(f"✅ Data loaded successfully!")
+            st.info(f"📊 Loaded {len(df)} records for {df['part_code'].nunique()} parts")
+            st.info(f"📅 Date range: {df['date'].min().strftime('%Y-%m')} to {df['date'].max().strftime('%Y-%m')}")
+            
+            # Show data preview
+            if st.checkbox("Show data preview"):
+                st.subheader("Data Preview")
+                st.dataframe(df.head(10))
+                
+                # Basic statistics
+                st.subheader("Basic Statistics")
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Parts", df['part_code'].nunique())
+                with col2:
+                    st.metric("Total Records", len(df))
+                with col3:
+                    st.metric("Avg Monthly Sales", f"{df['sales'].mean():.0f}")
+                with col4:
+                    st.metric("Date Range (Months)", df['date'].nunique())
+            
+            # Training section
+            st.header("🎯 Train Prediction Models")
+            
+            if st.button("🚀 Start Training", type="primary"):
+                with st.spinner("Training models... This may take a few minutes."):
+                    progress_bar = st.progress(0)
+                    
+                    # Engineer features
+                    progress_bar.progress(20)
+                    st.write("Engineering features...")
+                    df_features = predictor.engineer_features(df)
+                    
+                    # Train models
+                    progress_bar.progress(40)
+                    st.write("Training models for each part...")
+                    results = predictor.train_system(df)
+                    
+                    progress_bar.progress(80)
+                    st.write("Evaluating performance...")
+                    performance = predictor.evaluate_system_performance(df)
+                    
+                    progress_bar.progress(100)
+                    st.success("✅ Training completed!")
+                
+                # Display results
+                st.header("📈 Model Performance")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric(
+                        "Average MAPE", 
+                        f"{performance['ensemble_mape'].mean():.2f}%",
+                        delta=f"-{abs(25 - performance['ensemble_mape'].mean()):.1f}% vs baseline"
+                    )
+                
+                with col2:
+                    st.metric(
+                        "Parts Successfully Modeled", 
+                        f"{len(performance)}/{df['part_code'].nunique()}",
+                        delta=f"{len(performance)/df['part_code'].nunique()*100:.0f}% coverage"
+                    )
+                
+                # Performance details
+                st.subheader("Best Performing Parts")
+                top_performers = performance.nsmallest(5, 'ensemble_mape')
+                st.dataframe(top_performers[['part_code', 'ensemble_mape', 'best_model']])
+                
+                st.subheader("Parts Needing Attention")
+                bottom_performers = performance.nlargest(5, 'ensemble_mape')
+                st.dataframe(bottom_performers[['part_code', 'ensemble_mape', 'best_model']])
+                
+                # Predictions section
+                st.header("🔮 Generate Predictions")
+                
+                if st.button("Generate Next Month Predictions"):
+                    with st.spinner("Generating predictions..."):
+                        predictions = []
+                        
+                        for part_code in predictor.models.keys():
+                            pred = predictor.predict_next_month(df, part_code)
+                            if pred:
+                                predictions.append(pred)
+                    
+                    if predictions:
+                        pred_df = pd.DataFrame(predictions)
+                        
+                        st.subheader("Prediction Results")
+                        
+                        # Summary metrics
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Total Predicted Sales", f"{pred_df['predicted_sales'].sum():.0f}")
+                        with col2:
+                            st.metric("Average per Part", f"{pred_df['predicted_sales'].mean():.0f}")
+                        with col3:
+                            st.metric("Highest Prediction", f"{pred_df['predicted_sales'].max():.0f}")
+                        
+                        # Top predictions
+                        st.subheader("Top 10 Predicted Sales")
+                        top_predictions = pred_df.nlargest(10, 'predicted_sales')
+                        st.dataframe(top_predictions[['part_code', 'predicted_sales', 'models_used']])
+                        
+                        # Download predictions
+                        csv = pred_df.to_csv(index=False)
+                        st.download_button(
+                            label="📥 Download Predictions as CSV",
+                            data=csv,
+                            file_name=f"sales_predictions_{datetime.now().strftime('%Y%m%d')}.csv",
+                            mime="text/csv"
+                        )
+                        
+                        # Store in session state for later use
+                        st.session_state['predictor'] = predictor
+                        st.session_state['predictions'] = predictions
+                        st.session_state['performance'] = performance
+                
+        except Exception as e:
+            st.error(f"❌ Error processing files: {str(e)}")
+            st.error("Please check your file formats and try again.")
+            
+            with st.expander("Error Details"):
+                st.code(str(e))
+    
+    else:
+        st.info("👆 Please upload both data files to continue")
+        
+        # Show sample file format
+        with st.expander("Expected File Formats"):
+            st.markdown("""
+            **2024 Sales File should contain:**
+            - Part codes in first column
+            - Monthly sales data in subsequent columns
+            - Headers like: Part Code, Description, Brand, Engine, Jan-2024, Feb-2024, etc.
+            
+            **Historical File should contain:**
+            - Part codes, dates/months, and sales values
+            - Headers like: Part, Month, Sales
+            """)
+
 # Usage Example
 def main():
     """Main execution function"""
     
-    # Initialize the improved prediction system
+    # Check if running in Streamlit
+    try:
+        import streamlit as st
+        # If we can import streamlit and we're in a streamlit context
+        if hasattr(st, 'session_state'):
+            create_streamlit_app()
+            return
+    except ImportError:
+        pass
+    
+    # Traditional execution for non-Streamlit environments
     predictor = ImprovedSalesPredictionSystem()
     
     # Load and prepare data
@@ -577,4 +887,4 @@ def main():
     return predictor, df, performance, predictions
 
 if __name__ == "__main__":
-    predictor, df, performance, predictions = main()
+    main()
