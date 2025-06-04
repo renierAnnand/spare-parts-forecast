@@ -726,6 +726,16 @@ def create_streamlit_app():
     st.title("🔧 Improved Sales Prediction System")
     st.markdown("Upload your sales data files to get started with improved predictions!")
     
+    # Initialize session state
+    if 'predictor' not in st.session_state:
+        st.session_state['predictor'] = None
+    if 'df' not in st.session_state:
+        st.session_state['df'] = None
+    if 'models_trained' not in st.session_state:
+        st.session_state['models_trained'] = False
+    if 'performance' not in st.session_state:
+        st.session_state['performance'] = None
+    
     # File uploaders
     st.header("📁 Upload Data Files")
     
@@ -747,12 +757,19 @@ def create_streamlit_app():
     
     if sales_2024_file and sales_hist_file:
         try:
-            # Initialize predictor
-            predictor = ImprovedSalesPredictionSystem()
+            # Initialize predictor if not already done
+            if st.session_state['predictor'] is None:
+                st.session_state['predictor'] = ImprovedSalesPredictionSystem()
             
-            # Load data with progress bar
-            with st.spinner("Loading and preparing data..."):
-                df = predictor.load_and_prepare_data(sales_2024_file, sales_hist_file)
+            predictor = st.session_state['predictor']
+            
+            # Load data with progress bar (only if not already loaded)
+            if st.session_state['df'] is None:
+                with st.spinner("Loading and preparing data..."):
+                    df = predictor.load_and_prepare_data(sales_2024_file, sales_hist_file)
+                    st.session_state['df'] = df
+            else:
+                df = st.session_state['df']
             
             st.success(f"✅ Data loaded successfully!")
             st.info(f"📊 Loaded {len(df)} records for {df['part_code'].nunique()} parts")
@@ -778,98 +795,134 @@ def create_streamlit_app():
             # Training section
             st.header("🎯 Train Prediction Models")
             
-            if st.button("🚀 Start Training", type="primary"):
-                with st.spinner("Training models... This may take a few minutes."):
-                    progress_bar = st.progress(0)
-                    
-                    # Engineer features
-                    progress_bar.progress(20)
-                    st.write("Engineering features...")
-                    df_features = predictor.engineer_features(df)
-                    
-                    # Train models
-                    progress_bar.progress(40)
-                    st.write("Training models for each part...")
-                    results = predictor.train_system(df)
-                    
-                    progress_bar.progress(80)
-                    st.write("Evaluating performance...")
-                    performance = predictor.evaluate_system_performance(df)
-                    
-                    progress_bar.progress(100)
-                    st.success("✅ Training completed!")
+            if not st.session_state['models_trained']:
+                if st.button("🚀 Start Training", type="primary"):
+                    with st.spinner("Training models... This may take a few minutes."):
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        # Engineer features
+                        progress_bar.progress(20)
+                        status_text.text("Engineering features...")
+                        df_features = predictor.engineer_features(df)
+                        
+                        # Train models
+                        progress_bar.progress(40)
+                        status_text.text("Training models for each part...")
+                        results = predictor.train_system(df)
+                        
+                        progress_bar.progress(80)
+                        status_text.text("Evaluating performance...")
+                        performance = predictor.evaluate_system_performance(df)
+                        
+                        # Store results in session state
+                        st.session_state['performance'] = performance
+                        st.session_state['models_trained'] = True
+                        
+                        progress_bar.progress(100)
+                        status_text.text("Training completed!")
+                        st.success("✅ Training completed!")
+                        st.rerun()  # Refresh to show results
+            else:
+                st.success("✅ Models already trained!")
+                performance = st.session_state['performance']
                 
                 # Display results
                 st.header("📈 Model Performance")
                 
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric(
-                        "Average MAPE", 
-                        f"{performance['ensemble_mape'].mean():.2f}%",
-                        delta=f"-{abs(25 - performance['ensemble_mape'].mean()):.1f}% vs baseline"
-                    )
-                
-                with col2:
-                    st.metric(
-                        "Parts Successfully Modeled", 
-                        f"{len(performance)}/{df['part_code'].nunique()}",
-                        delta=f"{len(performance)/df['part_code'].nunique()*100:.0f}% coverage"
-                    )
-                
-                # Performance details
-                st.subheader("Best Performing Parts")
-                top_performers = performance.nsmallest(5, 'ensemble_mape')
-                st.dataframe(top_performers[['part_code', 'ensemble_mape', 'best_model']])
-                
-                st.subheader("Parts Needing Attention")
-                bottom_performers = performance.nlargest(5, 'ensemble_mape')
-                st.dataframe(bottom_performers[['part_code', 'ensemble_mape', 'best_model']])
+                if performance is not None and len(performance) > 0:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric(
+                            "Average MAPE", 
+                            f"{performance['ensemble_mape'].mean():.2f}%",
+                            delta=f"-{abs(25 - performance['ensemble_mape'].mean()):.1f}% vs baseline"
+                        )
+                    
+                    with col2:
+                        st.metric(
+                            "Parts Successfully Modeled", 
+                            f"{len(performance)}/{df['part_code'].nunique()}",
+                            delta=f"{len(performance)/df['part_code'].nunique()*100:.0f}% coverage"
+                        )
+                    
+                    # Performance details
+                    st.subheader("Best Performing Parts")
+                    top_performers = performance.nsmallest(5, 'ensemble_mape')
+                    st.dataframe(top_performers[['part_code', 'ensemble_mape', 'best_model']])
+                    
+                    st.subheader("Parts Needing Attention")
+                    bottom_performers = performance.nlargest(5, 'ensemble_mape')
+                    st.dataframe(bottom_performers[['part_code', 'ensemble_mape', 'best_model']])
                 
                 # Predictions section
                 st.header("🔮 Generate Predictions")
                 
-                if st.button("Generate Next Month Predictions"):
-                    with st.spinner("Generating predictions..."):
-                        predictions = []
-                        
-                        for part_code in predictor.models.keys():
-                            pred = predictor.predict_next_month(df, part_code)
-                            if pred:
-                                predictions.append(pred)
+                # Check if we have trained models
+                if hasattr(predictor, 'models') and len(predictor.models) > 0:
+                    st.info(f"Ready to generate predictions for {len(predictor.models)} parts")
                     
-                    if predictions:
-                        pred_df = pd.DataFrame(predictions)
+                    if st.button("Generate Next Month Predictions", type="primary"):
+                        with st.spinner("Generating predictions..."):
+                            predictions = []
+                            prediction_progress = st.progress(0)
+                            
+                            model_parts = list(predictor.models.keys())
+                            total_parts = len(model_parts)
+                            
+                            for i, part_code in enumerate(model_parts):
+                                try:
+                                    pred = predictor.predict_next_month(df, part_code)
+                                    if pred and pred['predicted_sales'] is not None:
+                                        predictions.append(pred)
+                                except Exception as e:
+                                    st.warning(f"Failed to predict for part {part_code}: {str(e)}")
+                                
+                                # Update progress
+                                prediction_progress.progress((i + 1) / total_parts)
                         
-                        st.subheader("Prediction Results")
+                        if predictions:
+                            pred_df = pd.DataFrame(predictions)
+                            
+                            st.subheader("Prediction Results")
+                            st.success(f"✅ Generated predictions for {len(predictions)} parts!")
+                            
+                            # Summary metrics
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("Total Predicted Sales", f"{pred_df['predicted_sales'].sum():.0f}")
+                            with col2:
+                                st.metric("Average per Part", f"{pred_df['predicted_sales'].mean():.0f}")
+                            with col3:
+                                st.metric("Highest Prediction", f"{pred_df['predicted_sales'].max():.0f}")
+                            
+                            # Top predictions
+                            st.subheader("Top 10 Predicted Sales")
+                            top_predictions = pred_df.nlargest(10, 'predicted_sales')
+                            st.dataframe(top_predictions[['part_code', 'predicted_sales', 'models_used']])
+                            
+                            # All predictions table
+                            with st.expander("View All Predictions"):
+                                st.dataframe(pred_df.sort_values('predicted_sales', ascending=False))
+                            
+                            # Download predictions
+                            csv = pred_df.to_csv(index=False)
+                            st.download_button(
+                                label="📥 Download Predictions as CSV",
+                                data=csv,
+                                file_name=f"sales_predictions_{datetime.now().strftime('%Y%m%d')}.csv",
+                                mime="text/csv"
+                            )
+                            
+                            # Store predictions in session state
+                            st.session_state['predictions'] = predictions
                         
-                        # Summary metrics
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Total Predicted Sales", f"{pred_df['predicted_sales'].sum():.0f}")
-                        with col2:
-                            st.metric("Average per Part", f"{pred_df['predicted_sales'].mean():.0f}")
-                        with col3:
-                            st.metric("Highest Prediction", f"{pred_df['predicted_sales'].max():.0f}")
-                        
-                        # Top predictions
-                        st.subheader("Top 10 Predicted Sales")
-                        top_predictions = pred_df.nlargest(10, 'predicted_sales')
-                        st.dataframe(top_predictions[['part_code', 'predicted_sales', 'models_used']])
-                        
-                        # Download predictions
-                        csv = pred_df.to_csv(index=False)
-                        st.download_button(
-                            label="📥 Download Predictions as CSV",
-                            data=csv,
-                            file_name=f"sales_predictions_{datetime.now().strftime('%Y%m%d')}.csv",
-                            mime="text/csv"
-                        )
-                        
-                        # Store in session state for later use
-                        st.session_state['predictor'] = predictor
-                        st.session_state['predictions'] = predictions
-                        st.session_state['performance'] = performance
+                        else:
+                            st.error("❌ No predictions generated. Please check your data and try again.")
+                
+                else:
+                    st.warning("⚠️ No trained models available. Please train the models first.")
+                    st.session_state['models_trained'] = False
                 
         except Exception as e:
             st.error(f"❌ Error processing files: {str(e)}")
@@ -877,6 +930,8 @@ def create_streamlit_app():
             
             with st.expander("Error Details"):
                 st.code(str(e))
+                import traceback
+                st.code(traceback.format_exc())
     
     else:
         st.info("👆 Please upload both data files to continue")
@@ -893,7 +948,24 @@ def create_streamlit_app():
             - Part codes, dates/months, and sales values
             - Headers like: Part, Month, Sales
             """)
-
+    
+    # Add a reset button in the sidebar
+    with st.sidebar:
+        st.header("🔄 Controls")
+        if st.button("Reset Application"):
+            # Clear all session state
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
+        
+        if st.session_state.get('models_trained', False):
+            st.success("✅ Models trained")
+            st.info(f"📊 {len(st.session_state.get('predictor', {}).models) if st.session_state.get('predictor') else 0} parts modeled")
+        
+        # Show memory usage info
+        if st.session_state.get('df') is not None:
+            df_size = st.session_state['df'].memory_usage(deep=True).sum() / 1024 / 1024
+            st.info(f"💾 Data size: {df_size:.1f} MB")
 # Usage Example
 def main():
     """Main execution function"""
