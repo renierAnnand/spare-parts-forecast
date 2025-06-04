@@ -752,46 +752,57 @@ def main():
     with st.sidebar:
         st.header("📁 Data Upload")
         
-        # Historical data upload
+        # Multiple historical files upload
         st.subheader("📈 Historical Sales Data")
-        hist_file = st.file_uploader(
-            "Upload Historical Sales Data", 
+        hist_files = st.file_uploader(
+            "Upload Historical Sales Data (Multiple files supported)", 
             type=['csv', 'xlsx'],
-            help="Upload your historical sales data with Month and Sales columns"
+            accept_multiple_files=True,
+            help="Upload multiple years of sales data - will be automatically combined"
         )
         
-        if hist_file:
-            st.success(f"✅ Uploaded: {hist_file.name}")
+        if hist_files:
+            st.success(f"✅ Uploaded {len(hist_files)} file(s):")
+            for file in hist_files:
+                st.write(f"  • {file.name}")
         
         # Actual 2024 data upload
-        st.subheader("📊 Actual 2024 Data (Optional)")
+        st.subheader("📊 Actual/Recent Data (Optional)")
         actual_file = st.file_uploader(
-            "Upload Actual 2024 Data (Optional)", 
+            "Upload Recent Actual Data (Optional)", 
             type=['csv', 'xlsx'],
-            help="Upload actual 2024 data to calculate model accuracy"
+            help="Upload recent actual data to calculate model accuracy"
         )
         
         if actual_file:
             st.success(f"✅ Uploaded: {actual_file.name}")
         
+        # Data processing options
+        st.subheader("🔧 Data Processing Options")
+        sheet_name = st.text_input("Excel Sheet Name (optional)", placeholder="Sheet1")
+        skip_rows = st.number_input("Rows to skip", min_value=0, max_value=10, value=0)
+        
         # Data format help
         with st.expander("📋 Data Format Guide"):
             st.markdown("""
-            **Required columns for Historical Data:**
-            - **Month/Date**: Any column with 'month', 'date', or 'time' in the name
-            - **Sales**: Any column with 'sales', 'revenue', 'amount', or 'value' in the name
-            
-            **Optional columns for enhanced analysis:**
-            - Brand, Engine, Category (for hierarchical analysis)
+            **Your SPC Sales Format Detected:**
+            - Multiple Excel files (2022, 2023, etc.)
+            - Columns: Month, Brand/Part, Engine, Sales
+            - Will auto-detect and combine all files
             
             **Supported formats:**
-            - CSV (.csv)
-            - Excel (.xlsx)
+            - Excel (.xlsx) - Multiple sheets supported
+            - CSV (.csv) - Standard comma-separated
             
             **Date formats supported:**
             - 2023-01, 2023-01-01
             - Jan 2023, January 2023
             - 01/2023, 1/2023
+            
+            **Tips:**
+            - Upload multiple years at once
+            - System will auto-combine and sort data
+            - Missing months will be handled automatically
             """)
         
         st.header("🔧 Model Configuration")
@@ -815,58 +826,158 @@ def main():
             )
     
     # Main content area
-    if hist_file is not None:
+    if hist_files:
         try:
-            # Load historical data
-            if hist_file.name.endswith('.csv'):
-                hist_df = pd.read_csv(hist_file)
-            else:
-                hist_df = pd.read_excel(hist_file)
+            # Load and combine multiple historical files
+            all_hist_data = []
+            
+            for hist_file in hist_files:
+                try:
+                    # Load each file
+                    if hist_file.name.endswith('.csv'):
+                        df = pd.read_csv(hist_file, skiprows=skip_rows)
+                    else:
+                        # Handle Excel files with optional sheet name
+                        if sheet_name and sheet_name.strip():
+                            try:
+                                df = pd.read_excel(hist_file, sheet_name=sheet_name, skiprows=skip_rows)
+                            except:
+                                st.warning(f"Sheet '{sheet_name}' not found in {hist_file.name}, using first sheet")
+                                df = pd.read_excel(hist_file, skiprows=skip_rows)
+                        else:
+                            df = pd.read_excel(hist_file, skiprows=skip_rows)
+                    
+                    # Add file source for tracking
+                    df['Source_File'] = hist_file.name
+                    all_hist_data.append(df)
+                    st.success(f"✅ Loaded {len(df)} rows from {hist_file.name}")
+                    
+                except Exception as e:
+                    st.error(f"❌ Error loading {hist_file.name}: {str(e)}")
+                    continue
+            
+            if not all_hist_data:
+                st.error("❌ No files could be loaded successfully")
+                return
+            
+            # Combine all data
+            hist_df = pd.concat(all_hist_data, ignore_index=True)
+            st.info(f"📊 Combined {len(all_hist_data)} files into {len(hist_df)} total rows")
             
             # Debug: Show the original columns
-            st.write("**Original columns in your data:**", list(hist_df.columns))
+            st.write("**Original columns in your combined data:**", list(hist_df.columns))
             
             # Data preprocessing with flexible column detection
             hist_df.columns = hist_df.columns.str.strip()
             
-            # Try to find the date/month column
+            # Try to find the date/month column with more SPC-specific patterns
             date_col = None
             sales_col = None
             
-            # Look for date column (various possible names)
+            # Look for date column (SPC specific patterns)
             for col in hist_df.columns:
                 col_lower = col.lower()
-                if any(keyword in col_lower for keyword in ['month', 'date', 'time', 'period']):
+                if any(keyword in col_lower for keyword in ['month', 'date', 'time', 'period', 'year', 'mon']):
                     date_col = col
                     break
             
-            # Look for sales column
+            # Look for sales column (SPC specific patterns)
             for col in hist_df.columns:
                 col_lower = col.lower()
-                if any(keyword in col_lower for keyword in ['sales', 'revenue', 'amount', 'value', 'qty', 'quantity']):
+                if any(keyword in col_lower for keyword in ['sales', 'revenue', 'amount', 'value', 'qty', 'quantity', 'volume', 'units']):
                     sales_col = col
                     break
             
+            # If still not found, try index-based detection for SPC format
+            if date_col is None and len(hist_df.columns) >= 1:
+                # Often first column is date in SPC files
+                first_col = hist_df.columns[0]
+                try:
+                    pd.to_datetime(hist_df[first_col].iloc[:5])  # Test first 5 values
+                    date_col = first_col
+                    st.info(f"📅 Auto-detected date column by position: '{first_col}'")
+                except:
+                    pass
+            
+            if sales_col is None and len(hist_df.columns) >= 2:
+                # Often last column is sales/quantity
+                for col in reversed(hist_df.columns[1:]):  # Skip first column (likely date)
+                    if pd.api.types.is_numeric_dtype(hist_df[col]):
+                        sales_col = col
+                        st.info(f"💰 Auto-detected sales column by type: '{sales_col}'")
+                        break
+            
             if date_col is None:
-                st.error("❌ Could not find a date/month column. Please ensure your data has a column with 'Month', 'Date', or 'Time' in the name.")
+                st.error("❌ Could not find a date/month column. Please ensure your data has a column with dates.")
                 st.info("Your columns: " + ", ".join(hist_df.columns))
+                
+                # Show sample data to help user identify columns
+                st.subheader("📋 Sample of your data:")
+                st.dataframe(hist_df.head(), use_container_width=True)
                 return
             
             if sales_col is None:
-                st.error("❌ Could not find a sales column. Please ensure your data has a column with 'Sales', 'Revenue', or 'Amount' in the name.")
+                st.error("❌ Could not find a sales/quantity column. Please ensure your data has a numeric sales column.")
                 st.info("Your columns: " + ", ".join(hist_df.columns))
+                
+                # Show sample data to help user identify columns
+                st.subheader("📋 Sample of your data:")
+                st.dataframe(hist_df.head(), use_container_width=True)
                 return
             
             # Rename columns to standard names
             hist_df = hist_df.rename(columns={date_col: 'Month', sales_col: 'Sales'})
             
-            # Try to convert Month column to datetime
+            # Try to convert Month column to datetime with multiple formats
             try:
-                hist_df['Month'] = pd.to_datetime(hist_df['Month'])
+                # Try multiple date parsing approaches
+                if hist_df['Month'].dtype == 'object':
+                    # Handle various date formats common in SPC files
+                    hist_df['Month'] = pd.to_datetime(hist_df['Month'], errors='coerce', 
+                                                      dayfirst=False, format=None)
+                    
+                    # If still NaT, try manual parsing for common SPC formats
+                    if hist_df['Month'].isna().all():
+                        # Try YYYY-MM format
+                        hist_df['Month'] = pd.to_datetime(hist_df[date_col].astype(str) + '-01', 
+                                                          errors='coerce')
+                else:
+                    hist_df['Month'] = pd.to_datetime(hist_df['Month'])
+                
+                # Remove rows where date conversion failed
+                before_count = len(hist_df)
+                hist_df = hist_df.dropna(subset=['Month'])
+                after_count = len(hist_df)
+                
+                if before_count > after_count:
+                    st.warning(f"⚠️ Removed {before_count - after_count} rows with invalid dates")
+                
+                if len(hist_df) == 0:
+                    st.error("❌ No valid dates found after conversion")
+                    return
+                
                 st.success(f"✅ Successfully detected Month column: '{date_col}' and Sales column: '{sales_col}'")
+                
             except Exception as e:
                 st.error(f"❌ Could not convert '{date_col}' to dates. Error: {str(e)}")
                 st.info("Please ensure your date column is in a format like: 2023-01, 2023-01-01, Jan 2023, etc.")
+                
+                # Show sample data
+                st.subheader("📋 Sample of your date data:")
+                st.write(hist_df[date_col].head(10).tolist())
+                return
+            
+            # Convert Sales to numeric, handling any text/formatting issues
+            try:
+                hist_df['Sales'] = pd.to_numeric(hist_df['Sales'], errors='coerce')
+                hist_df = hist_df.dropna(subset=['Sales'])
+                
+                if len(hist_df) == 0:
+                    st.error("❌ No valid sales data found")
+                    return
+                    
+            except Exception as e:
+                st.error(f"❌ Could not convert sales data to numbers: {str(e)}")
                 return
             
             hist_df = hist_df.sort_values('Month')
@@ -1354,19 +1465,46 @@ def main():
         except Exception as e:
             st.error(f"Error processing data: {str(e)}")
             st.info("Please ensure your data has the correct format with Month and Sales columns.")
+            
+            # Show detailed error information
+            with st.expander("🔍 Debugging Information"):
+                st.write("**Error details:**", str(e))
+                if hist_files:
+                    st.write("**Files uploaded:**", [f.name for f in hist_files])
     
     else:
-        st.info("👆 Please upload your historical sales data to get started.")
+        st.info("👆 Please upload your historical sales data files to get started.")
         
         # Show example data format
-        st.subheader("📋 Expected Data Format")
-        example_data = {
-            'Month': ['2023-01', '2023-02', '2023-03'],
-            'Brand': ['Brand A', 'Brand B', 'Brand A'],
-            'Engine': ['Engine 1', 'Engine 2', 'Engine 1'],
-            'Sales': [1000, 1200, 1100]
-        }
-        st.dataframe(pd.DataFrame(example_data))
+        st.subheader("📋 Expected Data Format for SPC Files")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Option 1: Simple Monthly Data**")
+            example_data = {
+                'Month': ['2022-01', '2022-02', '2022-03'],
+                'Sales': [1000, 1200, 1100]
+            }
+            st.dataframe(pd.DataFrame(example_data), use_container_width=True)
+        
+        with col2:
+            st.markdown("**Option 2: Detailed Part Data**")
+            example_data2 = {
+                'Month': ['2022-01', '2022-01', '2022-02'],
+                'Part': ['Part A', 'Part B', 'Part A'],
+                'Brand': ['Brand X', 'Brand Y', 'Brand X'],
+                'Quantity': [100, 150, 120]
+            }
+            st.dataframe(pd.DataFrame(example_data2), use_container_width=True)
+        
+        st.markdown("""
+        **📁 Multiple File Upload Tips:**
+        - Upload multiple years: `SPC Sales 2022.xlsx`, `SPC Sales 2023.xlsx`, etc.
+        - System will automatically combine and sort all data
+        - Each file should have the same column structure
+        - Dates will be auto-detected and standardized
+        """)
 
 
 if __name__ == "__main__":
