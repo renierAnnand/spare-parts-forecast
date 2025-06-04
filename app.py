@@ -1,4 +1,19 @@
-# Also filter forecast data to the same months for fair comparison
+def create_comparison_chart_for_available_months_only(result_df, forecast_year):
+    """
+    Create comparison chart only for months where actual data exists
+    """
+    actual_col = f'Actual_{forecast_year}'
+    
+    if actual_col not in result_df.columns:
+        return None
+    
+    # Filter to only months that have actual data
+    available_data = result_df[result_df[actual_col].notna()].copy()
+    
+    if len(available_data) == 0:
+        return None
+    
+    # Also filter forecast data to the same months for fair comparison
     forecast_cols = [col for col in result_df.columns if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']]
     
     fig = go.Figure()
