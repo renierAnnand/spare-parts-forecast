@@ -803,7 +803,7 @@ def enhanced_preprocessing(df):
                 df['Sales'] = np.log1p(df['Sales'])
                 df['log_transformed'] = True
                 df['boxcox_transformed'] = False
-        except:
+        except Exception:
             # Fallback to log transformation
             st.info(f"📈 Data skewness detected ({skewness:.2f}). Applying log transformation for better modeling.")
             df['Sales'] = np.log1p(df['Sales'])
@@ -1883,10 +1883,10 @@ def main():
                         result = model_func(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
                         if isinstance(result, tuple):
                             forecast_values = result[0]
-                            validation_score = result[1] if len(result) > 1 else np.inf
+                            validation_score = result[1] if len(result) > 1 else 999.0
                         else:
                             forecast_values = result
-                            validation_score = np.inf
+                            validation_score = 999.0
                     
                     # Validate forecast values and fix any issues
                     if isinstance(forecast_values, (list, np.ndarray)):
@@ -2279,7 +2279,7 @@ def main():
                 st.metric("📈 Enhanced Fallback", f"{simple_total:,.0f}")
         
         with col3:
-            avg_accuracy = np.mean([100 - v for v in validation_scores.values() if v != np.inf]) if validation_scores else 0
+            avg_accuracy = np.mean([100 - v for v in validation_scores.values() if v != 999.0 and v > 0]) if validation_scores else 0
             st.metric("🎯 Avg Model Accuracy", f"{avg_accuracy:.1f}%")
         
         with col4:
