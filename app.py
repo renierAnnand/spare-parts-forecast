@@ -2427,11 +2427,19 @@ def detect_data_frequency(dates):
     date_diffs = pd.Series(dates).diff().dropna()
     
     # Get mode of differences in days
-    mode_days = date_diffs.dt.days.mode()[0]
+    days_diff = date_diffs.dt.days
+    if len(days_diff) > 0:
+        mode_days = days_diff.mode()
+        if len(mode_days) > 0:
+            mode_days = mode_days.iloc[0]
+        else:
+            mode_days = days_diff.median()
+    else:
+        return 'M'  # Default to monthly
     
     if 28 <= mode_days <= 31:
         return 'M'  # Monthly
-    elif 7 <= mode_days <= 7:
+    elif 6 <= mode_days <= 8:
         return 'W'  # Weekly
     elif mode_days == 1:
         return 'D'  # Daily
