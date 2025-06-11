@@ -35,7 +35,7 @@ try:
     import xgboost as xgb
     XGBOOST_AVAILABLE = True
 except ImportError:
-    XGBOOST_AVAILABLE = False
+    XGBOOOT_AVAILABLE = False
 
 try:
     import tensorflow as tf
@@ -428,7 +428,7 @@ def load_actual_2024_data(uploaded_file, forecast_year):
                             # Example: "Jan-2024" -> "Jan-01-2024"
                             month_day_year_str = f"{month_col.split('-')[0]}-01-{month_col.split('-')[1]}"
                             try:
-                                # Adjust format based on actual data: e.g., '%b-%d-%Y' if "Jan-01-2024"
+                                # Adjust format based on actual data: '%b-%d-%Y' if "Jan-01-2024"
                                 month_date = pd.to_datetime(month_day_year_str, format="%b-%d-%Y")
                                 melted_data.append({
                                     "Month": month_date,
@@ -978,7 +978,7 @@ def run_advanced_prophet_forecast(data, forecast_periods=12, scaling_factor=1.0)
             elif transform_method == 'boxcox':
                 forecast_values = inv_boxcox(forecast_values, lambda_param)
                 lower_bound = inv_boxcox(lower_bound, lambda_param)
-                upper_bound = inv_boxcox(upper_box, lambda_param) # Fixed typo: upper_box -> upper_bound
+                upper_bound = inv_boxcox(upper_bound, lambda_param) # Fixed typo: upper_box -> upper_bound
         
         # Ensure forecasts are non-negative after inverse transformation and apply scaling
         forecast_values = np.maximum(forecast_values, 0) * scaling_factor
