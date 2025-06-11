@@ -883,50 +883,113 @@ def run_meta_learning_ensemble(forecasts_dict, historical_data, actual_data=None
 
 def calculate_comprehensive_metrics(actual, forecast):
     """Calculate comprehensive accuracy metrics"""
-    if len(actual) == 0 or len(forecast) == 0:
-        return None
-    
-    mask = ~(pd.isna(actual) | pd.isna(forecast))
-    actual_clean = actual[mask]
-    forecast_clean = forecast[mask]
-    
-    if len(actual_clean) == 0:
-        return None
-    
-    metrics = {}
-    
-    # Standard metrics
-    metrics['MAE'] = mean_absolute_error(actual_clean, forecast_clean)
-    metrics['RMSE'] = np.sqrt(mean_squared_error(actual_clean, forecast_clean))
-    metrics['MAPE'] = mean_absolute_percentage_error(actual_clean, forecast_clean) * 100
-    
-    # Additional metrics
-    metrics['SMAPE'] = 100 * np.mean(2 * np.abs(forecast_clean - actual_clean) / 
-                                    (np.abs(actual_clean) + np.abs(forecast_clean)))
-    
-    # MASE
-    if len(actual_clean) > 1:
-        naive_errors = np.abs(np.diff(actual_clean))
-        if naive_errors.mean() > 0:
-            metrics['MASE'] = metrics['MAE'] / naive_errors.mean()
+    try:
+        # Convert to numpy arrays and handle different input types
+        if hasattr(actual, 'values'):
+            actual_vals = actual.values
         else:
+            actual_vals = np.array(actual)
+            
+        if hasattr(forecast, 'values'):
+            forecast_vals = forecast.values
+        else:
+            forecast_vals = np.array(forecast)
+        
+        if len(actual_vals) == 0 or len(forecast_vals) == 0:
+            return None
+        
+        # Create mask for valid values
+        mask = ~(pd.isna(actual_vals) | pd.isna(forecast_vals) | 
+                np.isinf(actual_vals) | np.isinf(forecast_vals))
+        
+        actual_clean = actual_vals[mask]
+        forecast_clean = forecast_vals[mask]
+        
+        if len(actual_clean) == 0:
+            return None
+        
+        metrics = {}
+        
+        # Standard metrics with error handling
+        try:
+            metrics['MAE'] = mean_absolute_error(actual_clean, forecast_clean)
+        except:
+            metrics['MAE'] = np.mean(np.abs(actual_clean - forecast_clean))
+            
+        try:
+            metrics['RMSE'] = np.sqrt(mean_squared_error(actual_clean, forecast_clean))
+        except:
+            metrics['RMSE'] = np.sqrt(np.mean((actual_clean - forecast_clean) ** 2))
+            
+        try:
+            # Avoid division by zero in MAPE
+            non_zero_actual = actual_clean[actual_clean != 0]
+            non_zero_forecast = forecast_clean[actual_clean != 0]
+            if len(non_zero_actual) > 0:
+                metrics['MAPE'] = np.mean(np.abs((non_zero_actual - non_zero_forecast) / non_zero_actual)) * 100
+            else:
+                metrics['MAPE'] = 0
+        except:
+            metrics['MAPE'] = 0
+        
+        # SMAPE with safe division
+        try:
+            denominator = np.abs(actual_clean) + np.abs(forecast_clean)
+            denominator[denominator == 0] = 1  # Avoid division by zero
+            metrics['SMAPE'] = 100 * np.mean(2 * np.abs(forecast_clean - actual_clean) / denominator)
+        except:
+            metrics['SMAPE'] = 0
+        
+        # MASE
+        try:
+            if len(actual_clean) > 1:
+                naive_errors = np.abs(np.diff(actual_clean))
+                if naive_errors.mean() > 0:
+                    metrics['MASE'] = metrics['MAE'] / naive_errors.mean()
+                else:
+                    metrics['MASE'] = np.inf
+            else:
+                metrics['MASE'] = np.inf
+        except:
             metrics['MASE'] = np.inf
-    
-    # Directional accuracy
-    if len(actual_clean) > 1:
-        actual_direction = np.diff(actual_clean) > 0
-        forecast_direction = np.diff(forecast_clean) > 0
-        metrics['Directional_Accuracy'] = np.mean(actual_direction == forecast_direction) * 100
-    
-    # Bias
-    metrics['Bias'] = np.mean(forecast_clean - actual_clean)
-    metrics['Bias_Pct'] = (metrics['Bias'] / np.mean(actual_clean)) * 100
-    
-    # Tracking signal
-    cumulative_error = np.cumsum(forecast_clean - actual_clean)
-    metrics['Tracking_Signal'] = cumulative_error[-1] / metrics['MAE'] if metrics['MAE'] > 0 else 0
-    
-    return metrics
+        
+        # Directional accuracy
+        try:
+            if len(actual_clean) > 1:
+                actual_direction = np.diff(actual_clean) > 0
+                forecast_direction = np.diff(forecast_clean) > 0
+                metrics['Directional_Accuracy'] = np.mean(actual_direction == forecast_direction) * 100
+            else:
+                metrics['Directional_Accuracy'] = 0
+        except:
+            metrics['Directional_Accuracy'] = 0
+        
+        # Bias
+        try:
+            metrics['Bias'] = np.mean(forecast_clean - actual_clean)
+            if np.mean(actual_clean) != 0:
+                metrics['Bias_Pct'] = (metrics['Bias'] / np.mean(actual_clean)) * 100
+            else:
+                metrics['Bias_Pct'] = 0
+        except:
+            metrics['Bias'] = 0
+            metrics['Bias_Pct'] = 0
+        
+        # Tracking signal
+        try:
+            cumulative_error = np.cumsum(forecast_clean - actual_clean)
+            if metrics['MAE'] > 0:
+                metrics['Tracking_Signal'] = cumulative_error[-1] / metrics['MAE']
+            else:
+                metrics['Tracking_Signal'] = 0
+        except:
+            metrics['Tracking_Signal'] = 0
+        
+        return metrics
+        
+    except Exception as e:
+        st.warning(f"Error calculating metrics: {str(e)}")
+        return None
 
 
 def detect_and_apply_scaling(historical_data, actual_data=None):
@@ -1068,43 +1131,68 @@ def create_forecast_plot(result_df, forecast_year, historical_df=None):
     """Create comprehensive forecast visualization"""
     fig = make_subplots(
         rows=2, cols=2,
-        subplot_titles=('Forecast Comparison', 'Model Performance', 
-                       'Seasonal Pattern', 'Data Distribution'),
+        subplot_titles=('📈 Forecast Comparison', '🎯 Model Performance', 
+                       '🌊 Seasonal Pattern', '📊 Data Distribution'),
         vertical_spacing=0.15,
-        horizontal_spacing=0.1
+        horizontal_spacing=0.12,
+        specs=[[{"secondary_y": False}, {"type": "bar"}],
+               [{"type": "bar"}, {"type": "histogram"}]]
     )
     
-    # Main forecast comparison
+    # Define colors for better visibility
+    colors = {
+        'Historical': '#2E86AB',
+        'SARIMA': '#A23B72',
+        'Prophet': '#F18F01',
+        'ETS': '#C73E1D',
+        'XGBoost': '#F1D302',
+        'Theta': '#8B5A3C',
+        'Croston': '#6A994E',
+        'LSTM': '#BC4749',
+        'Weighted_Ensemble': '#FF6B6B',
+        'Meta_Learning': '#4ECDC4',
+        'Actual': '#000000'
+    }
+    
+    # Main forecast comparison (Row 1, Col 1)
     forecast_cols = [col for col in result_df.columns if '_Forecast' in col or 
                     col in ['Weighted_Ensemble', 'Meta_Learning']]
     actual_col = f'Actual_{forecast_year}'
     
-    colors = px.colors.qualitative.Set3
-    
-    # Add historical data
-    if historical_df is not None:
+    # Add historical data if available
+    if historical_df is not None and len(historical_df) > 0:
+        # Only show last 24 months of historical data for clarity
+        hist_display = historical_df.tail(24)
         fig.add_trace(
             go.Scatter(
-                x=historical_df['Month'],
-                y=historical_df['Sales_Original'],
+                x=hist_display['Month'],
+                y=hist_display['Sales_Original'],
                 mode='lines',
                 name='Historical',
-                line=dict(color='gray', width=2),
-                showlegend=True
+                line=dict(color=colors['Historical'], width=2),
+                showlegend=True,
+                hovertemplate='<b>Historical</b><br>' +
+                             'Date: %{x}<br>' +
+                             'Sales: %{y:,.0f}<br>' +
+                             '<extra></extra>'
             ),
             row=1, col=1
         )
     
-    # Add forecasts
+    # Add forecasts with improved visibility
     for i, col in enumerate(forecast_cols):
         model_name = col.replace('_Forecast', '').replace('_', ' ')
         
+        # Special styling for ensemble models
         if col in ['Weighted_Ensemble', 'Meta_Learning']:
-            line_style = dict(width=3, dash='dash' if col == 'Weighted_Ensemble' else 'dot')
-            line_color = '#FF6B6B' if col == 'Weighted_Ensemble' else '#4ECDC4'
+            line_style = dict(
+                width=4 if col == 'Weighted_Ensemble' else 3,
+                dash='dash' if col == 'Weighted_Ensemble' else 'dot'
+            )
+            line_color = colors.get(col, '#FF6B6B')
         else:
-            line_style = dict(width=2)
-            line_color = colors[i % len(colors)]
+            line_style = dict(width=2.5)
+            line_color = colors.get(model_name, px.colors.qualitative.Set3[i % len(px.colors.qualitative.Set3)])
         
         fig.add_trace(
             go.Scatter(
@@ -1113,12 +1201,16 @@ def create_forecast_plot(result_df, forecast_year, historical_df=None):
                 mode='lines+markers',
                 name=model_name,
                 line=dict(color=line_color, **line_style),
-                marker=dict(size=6)
+                marker=dict(size=8 if col in ['Weighted_Ensemble', 'Meta_Learning'] else 6),
+                hovertemplate=f'<b>{model_name}</b><br>' +
+                             'Date: %{x}<br>' +
+                             'Forecast: %{y:,.0f}<br>' +
+                             '<extra></extra>'
             ),
             row=1, col=1
         )
     
-    # Add actual data if available
+    # Add actual data with emphasis
     if actual_col in result_df.columns:
         actual_data = result_df[result_df[actual_col].notna()]
         if len(actual_data) > 0:
@@ -1128,50 +1220,139 @@ def create_forecast_plot(result_df, forecast_year, historical_df=None):
                     y=actual_data[actual_col],
                     mode='lines+markers',
                     name='Actual',
-                    line=dict(color='black', width=4),
-                    marker=dict(size=10, symbol='star')
+                    line=dict(color=colors['Actual'], width=5),
+                    marker=dict(size=12, symbol='star', 
+                              line=dict(width=2, color='white')),
+                    hovertemplate='<b>Actual</b><br>' +
+                                 'Date: %{x}<br>' +
+                                 'Sales: %{y:,.0f}<br>' +
+                                 '<extra></extra>'
                 ),
                 row=1, col=1
             )
     
-    # Seasonal pattern analysis
+    # Model Performance Bar Chart (Row 1, Col 2)
+    if actual_col in result_df.columns and result_df[actual_col].notna().any():
+        model_performance = []
+        for col in forecast_cols:
+            model_name = col.replace('_Forecast', '').replace('_', ' ')
+            actual_subset = result_df[result_df[actual_col].notna()]
+            
+            if len(actual_subset) > 0:
+                try:
+                    metrics = calculate_comprehensive_metrics(
+                        actual_subset[actual_col],
+                        actual_subset[col]
+                    )
+                    if metrics and 'MAPE' in metrics:
+                        model_performance.append({
+                            'Model': model_name,
+                            'MAPE': metrics['MAPE']
+                        })
+                except:
+                    continue
+        
+        if model_performance:
+            perf_df = pd.DataFrame(model_performance).sort_values('MAPE')
+            
+            fig.add_trace(
+                go.Bar(
+                    x=perf_df['MAPE'],
+                    y=perf_df['Model'],
+                    orientation='h',
+                    name='MAPE (%)',
+                    marker_color='lightcoral',
+                    text=[f"{v:.1f}%" for v in perf_df['MAPE']],
+                    textposition='auto',
+                    showlegend=False,
+                    hovertemplate='<b>%{y}</b><br>MAPE: %{x:.1f}%<extra></extra>'
+                ),
+                row=1, col=2
+            )
+    
+    # Seasonal Pattern Analysis (Row 2, Col 1)
     if 'Weighted_Ensemble' in result_df.columns:
         monthly_avg = result_df.groupby(result_df['Month'].dt.month)['Weighted_Ensemble'].mean()
         seasonal_index = (monthly_avg / monthly_avg.mean() * 100).round(1)
         
+        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        
+        colors_seasonal = ['#ff4444' if v < 100 else '#44ff44' for v in seasonal_index.values]
+        
         fig.add_trace(
             go.Bar(
-                x=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
-                   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+                x=month_names,
                 y=seasonal_index.values,
                 name='Seasonal Index',
-                marker_color=['red' if v < 100 else 'green' for v in seasonal_index.values],
-                showlegend=False
+                marker_color=colors_seasonal,
+                text=[f"{v:.0f}" for v in seasonal_index.values],
+                textposition='auto',
+                showlegend=False,
+                hovertemplate='<b>%{x}</b><br>Index: %{y:.1f}<br>' +
+                             '(100 = Average)<extra></extra>'
             ),
             row=2, col=1
         )
         
-        fig.add_hline(y=100, line_dash="dash", line_color="gray", row=2, col=1)
+        # Add reference line at 100
+        fig.add_hline(y=100, line_dash="dash", line_color="gray", 
+                     row=2, col=1, opacity=0.7)
     
-    # Data distribution
-    if historical_df is not None:
+    # Data Distribution (Row 2, Col 2)
+    if historical_df is not None and len(historical_df) > 0:
         fig.add_trace(
             go.Histogram(
                 x=historical_df['Sales_Original'],
                 name='Sales Distribution',
                 nbinsx=20,
-                showlegend=False
+                showlegend=False,
+                marker_color='lightblue',
+                opacity=0.7,
+                hovertemplate='Range: %{x}<br>Count: %{y}<extra></extra>'
             ),
             row=2, col=2
         )
     
-    # Update layout
+    # Update layout with better formatting
     fig.update_layout(
-        height=800,
-        title_text=f"Comprehensive Forecast Analysis - {forecast_year}",
+        height=900,
+        title={
+            'text': f"🔮 Comprehensive Forecast Analysis - {forecast_year}",
+            'x': 0.5,
+            'font': {'size': 20}
+        },
         showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5)
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=10)
+        ),
+        plot_bgcolor='white',
+        paper_bgcolor='white'
     )
+    
+    # Update axes
+    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='lightgray')
+    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='lightgray')
+    
+    # Format y-axis for main plot
+    fig.update_yaxes(tickformat=',', row=1, col=1)
+    fig.update_yaxes(title_text="Sales", row=1, col=1)
+    fig.update_xaxes(title_text="Date", row=1, col=1)
+    
+    # Format other subplots
+    fig.update_xaxes(title_text="MAPE (%)", row=1, col=2)
+    fig.update_yaxes(title_text="Model", row=1, col=2)
+    
+    fig.update_xaxes(title_text="Month", row=2, col=1)
+    fig.update_yaxes(title_text="Seasonal Index", row=2, col=1)
+    
+    fig.update_xaxes(title_text="Sales Value", row=2, col=2)
+    fig.update_yaxes(title_text="Frequency", row=2, col=2)
     
     return fig
 
@@ -1327,9 +1508,35 @@ def main():
     
     # Advanced settings
     with st.sidebar.expander("🔬 Advanced Settings", expanded=True):
-        st.subheader("🎯 Optimization Settings")
+        st.subheader("🎯 Data Processing")
         enable_preprocessing = st.checkbox("Advanced Data Preprocessing", value=True,
                                          help="Apply outlier detection, transformations, and data cleaning")
+        
+        # Unit scaling options
+        st.subheader("📊 Unit Scaling")
+        manual_scaling = st.selectbox(
+            "Manual Scaling Override",
+            options=["Auto-detect", "Historical in Thousands", "Historical in Millions", 
+                    "Actual in Thousands", "Actual in Millions", "Custom Ratio"],
+            index=0,
+            help="Override automatic scaling if you know the unit difference"
+        )
+        
+        custom_ratio = 1.0
+        if manual_scaling == "Custom Ratio":
+            custom_ratio = st.number_input("Custom Scaling Ratio", 
+                                         value=1.0, 
+                                         step=0.0001, 
+                                         format="%.4f",
+                                         help="Ratio to multiply forecasts (e.g., 0.001 if historical is in thousands)")
+        elif manual_scaling == "Historical in Thousands":
+            custom_ratio = 0.001
+        elif manual_scaling == "Historical in Millions":
+            custom_ratio = 0.000001
+        elif manual_scaling == "Actual in Thousands":
+            custom_ratio = 1000.0
+        elif manual_scaling == "Actual in Millions":
+            custom_ratio = 1000000.0
         
         st.subheader("🤖 Ensemble Settings")
         ensemble_method = st.selectbox(
@@ -1420,7 +1627,51 @@ def main():
         actual_df = load_actual_2024_data(io.BytesIO(actual_content), forecast_year)
         
         if actual_df is not None:
-            scaling_factor = detect_and_apply_scaling(hist_df, actual_df)
+            if manual_scaling == "Auto-detect":
+                scaling_factor = detect_and_apply_scaling(hist_df, actual_df)
+            else:
+                scaling_factor = custom_ratio
+                st.info(f"📊 **Manual Scaling Applied**: {scaling_factor:.6f}")
+            
+            # Additional validation check
+            if abs(scaling_factor - 1.0) > 0.1:
+                st.warning("🔍 **Data Scale Analysis:**")
+                
+                if scaling_factor < 0.01:
+                    st.error("🚨 **Critical**: Historical data appears to be in different units (possibly thousands/millions)")
+                    st.error("💡 **Recommendation**: Try 'Historical in Thousands' or 'Historical in Millions' in Advanced Settings")
+                elif scaling_factor > 100:
+                    st.error("🚨 **Critical**: Actual data appears to be in different units")
+                    st.error("💡 **Recommendation**: Try 'Actual in Thousands' or 'Actual in Millions' in Advanced Settings")
+                else:
+                    st.info(f"📊 Applied scaling factor: {scaling_factor:.4f}")
+    else:
+        # Apply manual scaling even without actual data
+        if manual_scaling != "Auto-detect":
+            scaling_factor = custom_ratio
+            st.info(f"📊 **Manual Scaling Applied**: {scaling_factor:.6f}")
+    
+    # Additional data validation
+    if hist_df is not None:
+        # Check for reasonable data ranges
+        hist_mean = hist_df['Sales_Original'].mean()
+        hist_std = hist_df['Sales_Original'].std()
+        cv = hist_std / hist_mean if hist_mean > 0 else 0
+        
+        if cv > 2:
+            st.warning("⚠️ **High Variability Detected**: Your data has high volatility (CV > 200%)")
+            st.info("💡 Consider using ensemble methods or robust forecasting techniques")
+        
+        # Check for trend
+        if len(hist_df) >= 12:
+            recent_avg = hist_df['Sales_Original'].tail(6).mean()
+            older_avg = hist_df['Sales_Original'].head(6).mean()
+            trend_ratio = recent_avg / older_avg if older_avg > 0 else 1
+            
+            if trend_ratio > 1.5:
+                st.info("📈 **Strong Growth Trend** detected in recent data")
+            elif trend_ratio < 0.5:
+                st.warning("📉 **Declining Trend** detected in recent data")
     
     # Data Analysis Dashboard
     st.header("📊 Data Analysis Dashboard")
@@ -1612,37 +1863,51 @@ def main():
         if actual_col in result_df.columns and result_df[actual_col].notna().any():
             st.subheader("🎯 Model Performance Analysis")
             
-            # Create performance summary
+            # Create performance summary with error handling
             performance_data = []
             
-            for col in [c for c in result_df.columns if '_Forecast' in c or 
-                       c in ['Weighted_Ensemble', 'Meta_Learning']]:
-                model_name = col.replace('_Forecast', '').replace('_', ' ')
-                
-                # Calculate metrics only for available actual data
-                actual_subset = result_df[result_df[actual_col].notna()]
-                metrics = calculate_comprehensive_metrics(
-                    actual_subset[actual_col],
-                    actual_subset[col]
-                )
-                
-                if metrics:
-                    performance_data.append({
-                        'Model': model_name,
-                        'MAPE (%)': f"{metrics['MAPE']:.1f}",
-                        'RMSE': f"{metrics['RMSE']:,.0f}",
-                        'MAE': f"{metrics['MAE']:,.0f}",
-                        'Bias (%)': f"{metrics['Bias_Pct']:+.1f}",
-                        'Direction Acc (%)': f"{metrics.get('Directional_Accuracy', 0):.0f}",
-                        'Tracking Signal': f"{metrics['Tracking_Signal']:.1f}"
-                    })
+            model_cols = [c for c in result_df.columns if '_Forecast' in c or 
+                         c in ['Weighted_Ensemble', 'Meta_Learning']]
+            
+            for col in model_cols:
+                try:
+                    model_name = col.replace('_Forecast', '').replace('_', ' ')
+                    
+                    # Get subset with actual data available
+                    actual_subset = result_df[result_df[actual_col].notna()].copy()
+                    
+                    if len(actual_subset) == 0:
+                        continue
+                    
+                    # Calculate metrics with error handling
+                    metrics = calculate_comprehensive_metrics(
+                        actual_subset[actual_col],
+                        actual_subset[col]
+                    )
+                    
+                    if metrics:
+                        performance_data.append({
+                            'Model': model_name,
+                            'MAPE (%)': f"{metrics.get('MAPE', 0):.1f}",
+                            'RMSE': f"{metrics.get('RMSE', 0):,.0f}",
+                            'MAE': f"{metrics.get('MAE', 0):,.0f}",
+                            'Bias (%)': f"{metrics.get('Bias_Pct', 0):+.1f}",
+                            'Direction Acc (%)': f"{metrics.get('Directional_Accuracy', 0):.0f}",
+                            'Tracking Signal': f"{metrics.get('Tracking_Signal', 0):.1f}"
+                        })
+                except Exception as e:
+                    st.warning(f"Could not calculate metrics for {col}: {str(e)}")
+                    continue
             
             if performance_data:
                 perf_df = pd.DataFrame(performance_data)
                 
-                # Sort by MAPE
-                perf_df['MAPE_numeric'] = perf_df['MAPE (%)'].str.replace('%', '').astype(float)
-                perf_df = perf_df.sort_values('MAPE_numeric').drop('MAPE_numeric', axis=1)
+                # Sort by MAPE (convert to numeric for sorting)
+                try:
+                    perf_df['MAPE_numeric'] = perf_df['MAPE (%)'].str.replace('%', '').astype(float)
+                    perf_df = perf_df.sort_values('MAPE_numeric').drop('MAPE_numeric', axis=1)
+                except:
+                    pass  # Keep original order if sorting fails
                 
                 # Display performance table
                 st.dataframe(
@@ -1651,10 +1916,15 @@ def main():
                     hide_index=True
                 )
                 
-                # Best model
-                best_model = perf_df.iloc[0]['Model']
-                best_mape = perf_df.iloc[0]['MAPE (%)']
-                st.success(f"🏆 Best Model: **{best_model}** (MAPE: {best_mape})")
+                # Show best model if available
+                if len(perf_df) > 0:
+                    best_model = perf_df.iloc[0]['Model']
+                    best_mape = perf_df.iloc[0]['MAPE (%)']
+                    st.success(f"🏆 Best Model: **{best_model}** (MAPE: {best_mape})")
+            else:
+                st.info("📊 Performance metrics will be available when actual data is provided for comparison.")
+        else:
+            st.info("📊 Upload actual data for the forecast year to see model performance analysis.")
         
         # Feature Importance (if XGBoost was used)
         if 'xgboost_info' in st.session_state and st.session_state['xgboost_info']:
