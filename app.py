@@ -346,6 +346,27 @@ def run_fallback_forecast(data, forecast_periods=12, scaling_factor=1.0):
         return np.array([historical_mean * scaling_factor] * forecast_periods)
 
 
+def apply_scaling_to_forecasts(forecasts, scaling_factor, data_info=None):
+    """Apply scaling factor to forecasts with validation"""
+    try:
+        scaled_forecasts = forecasts * scaling_factor
+        
+        # Additional validation - check if scaling makes sense
+        if data_info and 'actual_mean' in data_info:
+            forecast_mean = np.mean(scaled_forecasts)
+            actual_mean = data_info['actual_mean']
+            
+            # If still way off, apply more aggressive scaling
+            if forecast_mean > actual_mean * 10:  # Still 10x too high
+                additional_factor = actual_mean / forecast_mean
+                scaled_forecasts = scaled_forecasts * additional_factor
+                st.warning(f"🔧 Applied additional scaling: {additional_factor:.6f}")
+        
+        return np.maximum(scaled_forecasts, 0)
+    except:
+        return np.maximum(forecasts * scaling_factor, 0)
+
+
 def run_advanced_sarima_forecast(data, forecast_periods=12, scaling_factor=1.0):
     """SARIMA forecasting with automatic parameter selection"""
     try:
@@ -399,7 +420,8 @@ def run_advanced_sarima_forecast(data, forecast_periods=12, scaling_factor=1.0):
                     lambda_param = params['lambda']
                     forecast = inv_boxcox(forecast, lambda_param)
         
-        forecast = np.maximum(forecast, 0) * scaling_factor
+        # Apply scaling with enhanced validation
+        forecast = apply_scaling_to_forecasts(forecast, scaling_factor)
         
         return forecast, fitted_model.aic
         
@@ -447,6 +469,7 @@ def run_advanced_prophet_forecast(data, forecast_periods=12, scaling_factor=1.0)
             elif transform_method == 'sqrt':
                 forecast_values = forecast_values ** 2
         
+        # Apply scaling - this is the key fix
         forecast_values = np.maximum(forecast_values, 0) * scaling_factor
         
         return forecast_values, 100.0
@@ -509,6 +532,7 @@ def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0):
                         lambda_param = params['lambda']
                         forecast = inv_boxcox(forecast, lambda_param)
             
+            # Apply scaling - this is the key fix
             forecast = np.maximum(forecast, 0) * scaling_factor
             
             return forecast, best_aic
@@ -1512,31 +1536,47 @@ def main():
         enable_preprocessing = st.checkbox("Advanced Data Preprocessing", value=True,
                                          help="Apply outlier detection, transformations, and data cleaning")
         
-        # Unit scaling options
-        st.subheader("📊 Unit Scaling")
+        # Unit scaling options - More prominent and easier to use
+        st.subheader("🚨 SCALE FIX (Use if forecasts are too high/low)")
+        
+        # Quick fix buttons
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("📉 Divide by 1000", help="Click if forecasts are 1000x too high"):
+                st.session_state['quick_scale'] = 0.001
+        with col2:
+            if st.button("📉 Divide by 1M", help="Click if forecasts are 1,000,000x too high"):
+                st.session_state['quick_scale'] = 0.000001
+        
+        # Get scaling factor
+        if 'quick_scale' in st.session_state:
+            scaling_override = st.session_state['quick_scale']
+            st.success(f"🔧 Quick scaling applied: {scaling_override}")
+        else:
+            scaling_override = st.number_input(
+                "Manual Scale Factor", 
+                value=1.0, 
+                step=0.001,
+                format="%.6f",
+                help="Enter 0.001 to divide by 1000, or 0.000001 to divide by 1M"
+            )
+        
+        # Advanced manual scaling (keep existing)
         manual_scaling = st.selectbox(
-            "Manual Scaling Override",
-            options=["Auto-detect", "Historical in Thousands", "Historical in Millions", 
-                    "Actual in Thousands", "Actual in Millions", "Custom Ratio"],
-            index=0,
-            help="Override automatic scaling if you know the unit difference"
+            "Advanced Scaling Presets",
+            options=["None", "Historical in Thousands", "Historical in Millions", 
+                    "Actual in Thousands", "Actual in Millions"],
+            index=0
         )
         
-        custom_ratio = 1.0
-        if manual_scaling == "Custom Ratio":
-            custom_ratio = st.number_input("Custom Scaling Ratio", 
-                                         value=1.0, 
-                                         step=0.0001, 
-                                         format="%.4f",
-                                         help="Ratio to multiply forecasts (e.g., 0.001 if historical is in thousands)")
-        elif manual_scaling == "Historical in Thousands":
-            custom_ratio = 0.001
+        if manual_scaling == "Historical in Thousands":
+            scaling_override = 0.001
         elif manual_scaling == "Historical in Millions":
-            custom_ratio = 0.000001
+            scaling_override = 0.000001
         elif manual_scaling == "Actual in Thousands":
-            custom_ratio = 1000.0
+            scaling_override = 1000.0
         elif manual_scaling == "Actual in Millions":
-            custom_ratio = 1000000.0
+            scaling_override = 1000000.0
         
         st.subheader("🤖 Ensemble Settings")
         ensemble_method = st.selectbox(
@@ -1739,21 +1779,23 @@ def main():
             status_text.text(f"Training {model_name}...")
             
             try:
-                forecast_values, score = model_func(hist_df, 12, scaling_factor)
+                forecast_values, score = model_func(hist_df, 12, final_scaling_factor)
                 forecast_results[f"{model_name}_Forecast"] = forecast_values
                 validation_scores[model_name] = score
                 
-                # Show model-specific info
+                # Show model-specific info with scale validation
+                forecast_avg = np.mean(forecast_values)
+                forecast_range = f"{np.min(forecast_values):,.0f} - {np.max(forecast_values):,.0f}"
+                
                 if score != np.inf:
-                    st.success(f"✅ {model_name} completed (Score: {score:.2f})")
+                    st.success(f"✅ {model_name} completed - Avg: {forecast_avg:,.0f} (Range: {forecast_range})")
                 else:
-                    st.warning(f"⚠️ {model_name} completed with fallback")
+                    st.warning(f"⚠️ {model_name} completed with fallback - Avg: {forecast_avg:,.0f}")
                 
             except Exception as e:
                 st.error(f"❌ {model_name} failed: {str(e)}")
-                forecast_results[f"{model_name}_Forecast"] = run_fallback_forecast(
-                    hist_df, 12, scaling_factor
-                )
+                fallback_forecast = run_fallback_forecast(hist_df, 12, final_scaling_factor)
+                forecast_results[f"{model_name}_Forecast"] = fallback_forecast
                 validation_scores[model_name] = np.inf
             
             progress_bar.progress((i + 1) / len(models_to_run))
@@ -1813,6 +1855,46 @@ def main():
         
         # Display results
         st.header("📊 Forecast Results")
+        
+        # Check if forecasts look reasonable compared to actual data
+        if actual_df is not None and len(actual_df) > 0:
+            actual_col = f'Actual_{forecast_year}'
+            actual_values = result_df[result_df[actual_col].notna()][actual_col]
+            
+            if len(actual_values) > 0:
+                actual_mean = actual_values.mean()
+                
+                # Check if any forecast is way off
+                forecast_cols = [col for col in result_df.columns if '_Forecast' in col or 
+                               col in ['Weighted_Ensemble', 'Meta_Learning']]
+                
+                way_off_models = []
+                for col in forecast_cols:
+                    forecast_mean = result_df[col].mean()
+                    if forecast_mean > actual_mean * 3:  # More than 3x actual
+                        way_off_models.append((col, forecast_mean / actual_mean))
+                
+                if way_off_models:
+                    st.error("🚨 **Scale Issue Still Detected!**")
+                    st.error(f"   Actual data average: {actual_mean:,.0f}")
+                    
+                    for model, ratio in way_off_models[:3]:  # Show top 3
+                        model_name = model.replace('_Forecast', '')
+                        forecast_avg = result_df[model].mean()
+                        st.error(f"   {model_name} average: {forecast_avg:,.0f} ({ratio:.1f}x too high)")
+                    
+                    # Emergency fix button
+                    col1, col2, col3 = st.columns([1, 2, 1])
+                    with col2:
+                        if st.button("🔧 **EMERGENCY SCALE FIX**", type="primary", use_container_width=True):
+                            # Apply aggressive scaling to all forecasts
+                            correction_ratio = actual_mean / result_df[forecast_cols[0]].mean()
+                            
+                            for col in forecast_cols:
+                                result_df[col] = result_df[col] * correction_ratio
+                            
+                            st.success(f"✅ Applied emergency scaling: {correction_ratio:.6f}")
+                            st.rerun()
         
         # Summary statistics
         col1, col2, col3 = st.columns(3)
