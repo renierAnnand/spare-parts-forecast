@@ -1513,6 +1513,8 @@ def main():
     # Initialize session state
     if 'forecast_info' not in st.session_state:
         st.session_state.forecast_info = {}
+    if 'quick_scale' not in st.session_state:
+        st.session_state.quick_scale = 1.0
     
     # Display warnings for missing packages
     if not XGBOOST_AVAILABLE:
@@ -1549,7 +1551,7 @@ def main():
                 st.session_state['quick_scale'] = 0.000001
         
         # Get scaling factor
-        if 'quick_scale' in st.session_state:
+        if 'quick_scale' in st.session_state and st.session_state['quick_scale'] != 1.0:
             scaling_override = st.session_state['quick_scale']
             st.success(f"🔧 Quick scaling applied: {scaling_override}")
         else:
@@ -1627,6 +1629,126 @@ def main():
             "📊 Upload Historical Sales Data",
             type=["xlsx", "xls"],
             help="Excel file with 'Month' and 'Sales' columns"
+        )
+    
+    with col2:
+        actual_file = st.file_uploader(
+            f"📈 Upload {forecast_year} Actual Data (Optional)",
+            type=["xlsx", "xls"],
+            help="For validation and meta-learning"
+        )
+    
+    if historical_file is None:
+        st.info("👆 Please upload historical sales data to begin forecasting")
+        
+        # Show sample data format
+        with st.expander("📋 View Sample Data Format"):
+            sample_data = pd.DataFrame({
+                'Month': pd.date_range('2022-01-01', periods=24, freq='MS'),
+                'Sales': np.random.randint(1000, 5000, 24)
+            })
+            st.dataframe(sample_data.head(10))
+        
+        return
+    
+    # Load data
+    file_content = historical_file.read()
+    file_hash = hashlib.md5(file_content).hexdigest()
+    
+    hist_df = load_data_optimized(file_content, file_hash)
+    
+    if hist_df is None:
+        return
+    
+    # Load actual data if provided
+    actual_df = None
+    final_scaling_factor = scaling_override  # Use the scaling override directly
+    
+    if actual_file is not None:
+        actual_content = actual_file.read()
+        actual_df = load_actual_2024_data(io.BytesIO(actual_content), forecast_year)
+        
+        if actual_df is not None:
+            # Show the detected scaling issue but don't override manual setting
+            auto_scaling = detect_and_apply_scaling(hist_df, actual_df)
+            
+            # If user hasn't set manual scaling (still at default 1.0), use auto-detected
+            if scaling_override == 1.0:
+                final_scaling_factor = auto_scaling
+            else:
+                # User has set manual scaling - use that instead
+                final_scaling_factor = scaling_override
+            
+            st.info(f"📊 **Final Scaling Factor**: {final_scaling_factor:.6f}")
+            
+            if final_scaling_factor < 0.01:
+                st.success("✅ **Small Scaling Factor** - This will significantly REDUCE forecast values (divide by large number)")
+            elif final_scaling_factor > 100:
+                st.warning("⚠️ **Large Scaling Factor** - This will significantly INCREASE forecast values")
+    else:
+        final_scaling_factor = scaling_override
+        st.info(f"📊 **Scaling Factor**: {final_scaling_factor:.6f}")
+    
+    # Show clear guidance
+    if final_scaling_factor != 1.0:
+        if final_scaling_factor < 1.0:
+            reduction_factor = 1 / final_scaling_factor
+            st.success(f"✅ **Forecasts will be REDUCED** (divided by {reduction_factor:.0f})")
+        else:
+            st.success(f"✅ **Forecasts will be INCREASED** (multiplied by {final_scaling_factor:.0f})")
+    
+    # Additional data validation
+    if hist_df is not None:
+        # Check for reasonable data ranges
+        hist_mean = hist_df['Sales_Original'].mean()
+        hist_std = hist_df['Sales_Original'].std()
+        cv = hist_std / hist_mean if hist_mean > 0 else 0
+        
+        if cv > 2:
+            st.warning("⚠️ **High Variability Detected**: Your data has high volatility (CV > 200%)")
+            st.info("💡 Consider using ensemble methods or robust forecasting techniques")
+        
+        # Check for trend
+        if len(hist_df) >= 12:
+            recent_avg = hist_df['Sales_Original'].tail(6).mean()
+            older_avg = hist_df['Sales_Original'].head(6).mean()
+            trend_ratio = recent_avg / older_avg if older_avg > 0 else 1
+            
+            if trend_ratio > 1.5:
+                st.info("📈 **Strong Growth Trend** detected in recent data")
+            elif trend_ratio < 0.5:
+                st.warning("📉 **Declining Trend** detected in recent data")
+    
+    # Data Analysis Dashboard
+    st.header("📊 Data Analysis Dashboard")
+    
+    # Key metrics
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        st.metric("📅 Data Points", len(hist_df))
+    
+    with col2:
+        avg_sales = hist_df['Sales_Original'].mean()
+        st.metric("💰 Avg Sales", f"{avg_sales:,.0f}")
+    
+    with col3:
+        cv = hist_df['Sales_Original'].std() / avg_sales
+        st.metric("📊 CV", f"{cv:.2%}")
+    
+    with col4:
+        data_quality = min(100, len(hist_df) * 4.17)
+        st.metric("🎯 Data Quality", f"{data_quality:.0f}%")
+    
+    with col5:
+        freq = detect_data_frequency(hist_df['Month'])
+        st.metric("📆 Frequency", freq)
+    
+    # Show diagnostic plots
+    if show_diagnostics:
+        with st.expander("📈 Time Series Diagnostics", expanded=False):
+            diagnostic_fig = create_diagnostic_plots(hist_df)
+            st.plotly_chart(diagnostic_fig, use_container_width=True)' and 'Sales' columns"
         )
     
     with col2:
@@ -1746,6 +1868,466 @@ def main():
     
     # Forecasting section
     if st.button("🚀 Generate AI Forecasts", type="primary", use_container_width=True):
+        st.header("🔮 Generating Advanced Forecasts...")
+        
+        # Initialize progress tracking
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Prepare models
+        models_to_run = []
+        
+        if use_sarima:
+            models_to_run.append(("SARIMA", run_advanced_sarima_forecast))
+        if use_prophet:
+            models_to_run.append(("Prophet", run_advanced_prophet_forecast))
+        if use_ets:
+            models_to_run.append(("ETS", run_advanced_ets_forecast))
+        if use_xgboost:
+            models_to_run.append(("XGBoost", run_advanced_xgboost_forecast))
+        if use_theta:
+            models_to_run.append(("Theta", run_theta_forecast))
+        if use_croston:
+            models_to_run.append(("Croston", run_croston_forecast))
+        if use_lstm and TENSORFLOW_AVAILABLE:
+            models_to_run.append(("LSTM", run_lstm_forecast))
+        
+        # Run models
+        forecast_results = {}
+        validation_scores = {}
+        
+        # Sequential execution for stability
+        for i, (model_name, model_func) in enumerate(models_to_run):
+            status_text.text(f"Training {model_name}...")
+            
+            try:
+                forecast_values, score = model_func(hist_df, 12, final_scaling_factor)
+                forecast_results[f"{model_name}_Forecast"] = forecast_values
+                validation_scores[model_name] = score
+                
+                # Show model-specific info with scale validation
+                forecast_avg = np.mean(forecast_values)
+                forecast_range = f"{np.min(forecast_values):,.0f} - {np.max(forecast_values):,.0f}"
+                
+                if score != np.inf:
+                    st.success(f"✅ {model_name} completed - Avg: {forecast_avg:,.0f} (Range: {forecast_range})")
+                else:
+                    st.warning(f"⚠️ {model_name} completed with fallback - Avg: {forecast_avg:,.0f}")
+                
+            except Exception as e:
+                st.error(f"❌ {model_name} failed: {str(e)}")
+                fallback_forecast = run_fallback_forecast(hist_df, 12, final_scaling_factor)
+                forecast_results[f"{model_name}_Forecast"] = fallback_forecast
+                validation_scores[model_name] = np.inf
+            
+            progress_bar.progress((i + 1) / len(models_to_run))
+        
+        # Create ensemble forecasts
+        ensemble_weights = {}
+        if use_ensemble and len(forecast_results) > 1:
+            status_text.text("Creating ensemble forecasts...")
+            
+            # Weighted ensemble
+            ensemble_forecast, ensemble_weights, ensemble_variants = create_advanced_ensemble(
+                forecast_results, validation_scores, actual_df
+            )
+            forecast_results["Weighted_Ensemble"] = ensemble_forecast
+            
+            # Show ensemble weights
+            st.info(f"🎯 Ensemble Weights ({ensemble_method}): " + 
+                   ", ".join([f"{k}: {v:.1%}" for k, v in ensemble_weights.items()]))
+            
+            # Meta-learning
+            if enable_meta_learning and actual_df is not None:
+                meta_forecast = run_meta_learning_ensemble(
+                    forecast_results, hist_df, actual_df
+                )
+                if meta_forecast is not None:
+                    forecast_results["Meta_Learning"] = meta_forecast
+                    st.success("✅ Meta-learning ensemble created")
+        
+        # Clear progress indicators
+        progress_bar.empty()
+        status_text.empty()
+        
+        # Create results dataframe
+        forecast_dates = pd.date_range(
+            start=f"{forecast_year}-01-01",
+            end=f"{forecast_year}-12-01",
+            freq='MS'
+        )
+        
+        result_df = pd.DataFrame({
+            "Month": forecast_dates,
+            **forecast_results
+        })
+        
+        # Merge actual data
+        if actual_df is not None:
+            result_df = result_df.merge(actual_df, on="Month", how="left")
+            
+            # Show coverage info
+            actual_count = result_df[f'Actual_{forecast_year}'].notna().sum()
+            st.success(f"📊 Validation data available for {actual_count} months")
+        
+        # Store in session state
+        st.session_state['result_df'] = result_df
+        st.session_state['validation_scores'] = validation_scores
+        st.session_state['ensemble_weights'] = ensemble_weights
+        
+        # Display results
+        st.header("📊 Forecast Results")
+        
+        # Check if forecasts look reasonable compared to actual data
+        if actual_df is not None and len(actual_df) > 0:
+            actual_col = f'Actual_{forecast_year}'
+            actual_values = result_df[result_df[actual_col].notna()][actual_col]
+            
+            if len(actual_values) > 0:
+                actual_mean = actual_values.mean()
+                
+                # Check if any forecast is way off
+                forecast_cols = [col for col in result_df.columns if '_Forecast' in col or 
+                               col in ['Weighted_Ensemble', 'Meta_Learning']]
+                
+                way_off_models = []
+                for col in forecast_cols:
+                    forecast_mean = result_df[col].mean()
+                    if forecast_mean > actual_mean * 3:  # More than 3x actual
+                        way_off_models.append((col, forecast_mean / actual_mean))
+                
+                if way_off_models:
+                    st.error("🚨 **Scale Issue Still Detected!**")
+                    st.error(f"   Actual data average: {actual_mean:,.0f}")
+                    
+                    for model, ratio in way_off_models[:3]:  # Show top 3
+                        model_name = model.replace('_Forecast', '')
+                        forecast_avg = result_df[model].mean()
+                        st.error(f"   {model_name} average: {forecast_avg:,.0f} ({ratio:.1f}x too high)")
+                    
+                    # Emergency fix button
+                    col1, col2, col3 = st.columns([1, 2, 1])
+                    with col2:
+                        if st.button("🔧 **EMERGENCY SCALE FIX**", type="primary", use_container_width=True):
+                            # Apply aggressive scaling to all forecasts
+                            correction_ratio = actual_mean / result_df[forecast_cols[0]].mean()
+                            
+                            for col in forecast_cols:
+                                result_df[col] = result_df[col] * correction_ratio
+                            
+                            st.success(f"✅ Applied emergency scaling: {correction_ratio:.6f}")
+                            st.rerun()
+        
+        # Summary statistics
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            total_forecast = result_df['Weighted_Ensemble'].sum() if 'Weighted_Ensemble' in result_df else list(forecast_results.values())[0].sum()
+            st.metric("📈 Total Forecast", f"{total_forecast:,.0f}")
+        
+        with col2:
+            avg_monthly = total_forecast / 12
+            st.metric("📅 Average Monthly", f"{avg_monthly:,.0f}")
+        
+        with col3:
+            yoy_growth = ((total_forecast - hist_df['Sales_Original'].tail(12).sum()) / 
+                         hist_df['Sales_Original'].tail(12).sum() * 100)
+            st.metric("📊 YoY Growth", f"{yoy_growth:+.1f}%")
+        
+        # Show forecast table
+        st.subheader("📋 Detailed Forecasts")
+        
+        # Format display
+        display_df = result_df.copy()
+        display_df['Month'] = display_df['Month'].dt.strftime('%b %Y')
+        
+        # Round numeric columns
+        numeric_cols = [col for col in display_df.columns if col != 'Month']
+        for col in numeric_cols:
+            display_df[col] = display_df[col].apply(
+                lambda x: f"{x:,.0f}" if pd.notna(x) else "—"
+            )
+        
+        # Display dataframe
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            height=400
+        )
+        
+        # Visualization
+        st.subheader("📈 Forecast Visualization")
+        
+        # Create comprehensive plot
+        forecast_fig = create_forecast_plot(result_df, forecast_year, hist_df)
+        st.plotly_chart(forecast_fig, use_container_width=True)
+        
+        # Model Performance Analysis
+        actual_col = f'Actual_{forecast_year}'
+        if actual_col in result_df.columns and result_df[actual_col].notna().any():
+            st.subheader("🎯 Model Performance Analysis")
+            
+            # Create performance summary with error handling
+            performance_data = []
+            
+            model_cols = [c for c in result_df.columns if '_Forecast' in c or 
+                         c in ['Weighted_Ensemble', 'Meta_Learning']]
+            
+            for col in model_cols:
+                try:
+                    model_name = col.replace('_Forecast', '').replace('_', ' ')
+                    
+                    # Get subset with actual data available
+                    actual_subset = result_df[result_df[actual_col].notna()].copy()
+                    
+                    if len(actual_subset) == 0:
+                        continue
+                    
+                    # Calculate metrics with error handling
+                    metrics = calculate_comprehensive_metrics(
+                        actual_subset[actual_col],
+                        actual_subset[col]
+                    )
+                    
+                    if metrics:
+                        performance_data.append({
+                            'Model': model_name,
+                            'MAPE (%)': f"{metrics.get('MAPE', 0):.1f}",
+                            'RMSE': f"{metrics.get('RMSE', 0):,.0f}",
+                            'MAE': f"{metrics.get('MAE', 0):,.0f}",
+                            'Bias (%)': f"{metrics.get('Bias_Pct', 0):+.1f}",
+                            'Direction Acc (%)': f"{metrics.get('Directional_Accuracy', 0):.0f}",
+                            'Tracking Signal': f"{metrics.get('Tracking_Signal', 0):.1f}"
+                        })
+                except Exception as e:
+                    st.warning(f"Could not calculate metrics for {col}: {str(e)}")
+                    continue
+            
+            if performance_data:
+                perf_df = pd.DataFrame(performance_data)
+                
+                # Sort by MAPE (convert to numeric for sorting)
+                try:
+                    perf_df['MAPE_numeric'] = perf_df['MAPE (%)'].str.replace('%', '').astype(float)
+                    perf_df = perf_df.sort_values('MAPE_numeric').drop('MAPE_numeric', axis=1)
+                except:
+                    pass  # Keep original order if sorting fails
+                
+                # Display performance table
+                st.dataframe(
+                    perf_df,
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                # Show best model if available
+                if len(perf_df) > 0:
+                    best_model = perf_df.iloc[0]['Model']
+                    best_mape = perf_df.iloc[0]['MAPE (%)']
+                    st.success(f"🏆 Best Model: **{best_model}** (MAPE: {best_mape})")
+            else:
+                st.info("📊 Performance metrics will be available when actual data is provided for comparison.")
+        else:
+            st.info("📊 Upload actual data for the forecast year to see model performance analysis.")
+        
+        # Feature Importance (if XGBoost was used)
+        if 'xgboost_info' in st.session_state and st.session_state['xgboost_info']:
+            xgb_info = st.session_state['xgboost_info']
+            if 'feature_importance' in xgb_info:
+                st.subheader("🔍 Feature Importance Analysis")
+                
+                feat_imp_fig = create_feature_importance_plot(xgb_info['feature_importance'])
+                st.plotly_chart(feat_imp_fig, use_container_width=True)
+                
+                # Show top features
+                top_features = xgb_info['feature_importance'].head(5)
+                st.info(f"🎯 Top predictive features: {', '.join(top_features['feature'].tolist())}")
+        
+        # Ensemble Analysis
+        if ensemble_weights:
+            st.subheader("🤝 Ensemble Analysis")
+            
+            weights_df = pd.DataFrame([
+                {'Model': k, 'Weight': v} 
+                for k, v in ensemble_weights.items()
+            ]).sort_values('Weight', ascending=False)
+            
+            # Create weight visualization
+            fig = go.Figure(go.Bar(
+                x=weights_df['Model'],
+                y=weights_df['Weight'],
+                text=[f"{w:.1%}" for w in weights_df['Weight']],
+                textposition='auto',
+                marker_color='lightblue'
+            ))
+            
+            fig.update_layout(
+                title='Ensemble Model Weights',
+                xaxis_title='Model',
+                yaxis_title='Weight',
+                yaxis_tickformat='.0%',
+                height=400
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Advanced Analytics Section
+        st.header("📊 Advanced Analytics")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Seasonal analysis
+            st.subheader("🌊 Seasonal Pattern Analysis")
+            
+            if 'Weighted_Ensemble' in result_df.columns:
+                monthly_avg = result_df.groupby(result_df['Month'].dt.month)['Weighted_Ensemble'].mean()
+                seasonal_index = (monthly_avg / monthly_avg.mean() * 100).round(1)
+                
+                fig = go.Figure(go.Bar(
+                    x=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
+                       'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+                    y=seasonal_index.values,
+                    text=[f"{v:.0f}" for v in seasonal_index.values],
+                    textposition='auto',
+                    marker_color=['red' if v < 100 else 'green' for v in seasonal_index.values]
+                ))
+                
+                fig.update_layout(
+                    title='Seasonal Index (100 = Average)',
+                    xaxis_title='Month',
+                    yaxis_title='Index',
+                    height=350
+                )
+                
+                fig.add_hline(y=100, line_dash="dash", line_color="gray")
+                
+                st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Forecast stability
+            st.subheader("📊 Forecast Stability Analysis")
+            
+            forecast_cols = [col for col in result_df.columns if '_Forecast' in col]
+            if len(forecast_cols) > 1:
+                forecast_array = result_df[forecast_cols].values
+                cv_by_month = np.std(forecast_array, axis=1) / np.mean(forecast_array, axis=1)
+                
+                avg_cv = np.mean(cv_by_month)
+                stability_score = max(0, 100 - (avg_cv * 100))
+                
+                st.metric("🎯 Forecast Stability Score", f"{stability_score:.0f}%")
+                st.info(f"Average CV across models: {avg_cv:.2%}")
+                
+                # Monthly stability chart
+                fig = go.Figure(go.Scatter(
+                    x=result_df['Month'],
+                    y=cv_by_month,
+                    mode='lines+markers',
+                    name='CV by Month',
+                    line=dict(color='orange', width=2)
+                ))
+                
+                fig.update_layout(
+                    title='Forecast Variability by Month',
+                    xaxis_title='Month',
+                    yaxis_title='Coefficient of Variation',
+                    height=250
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+        
+        # Download Section
+        st.header("📥 Export Results")
+        
+        # Generate comprehensive report
+        excel_report = create_comprehensive_excel_report(
+            result_df,
+            hist_df,
+            forecast_year,
+            final_scaling_factor,
+            validation_scores,
+            ensemble_weights
+        )
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.download_button(
+                label="📊 Download Full Report (Excel)",
+                data=excel_report,
+                file_name=f"AI_Forecast_Report_{forecast_year}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        
+        with col2:
+            # CSV download
+            csv_data = result_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📄 Download Forecasts (CSV)",
+                data=csv_data,
+                file_name=f"Forecasts_{forecast_year}.csv",
+                mime="text/csv"
+            )
+        
+        with col3:
+            # JSON download for API integration
+            json_data = result_df.to_json(orient='records', date_format='iso')
+            st.download_button(
+                label="🔧 Download JSON (API)",
+                data=json_data,
+                file_name=f"forecast_api_{forecast_year}.json",
+                mime="application/json"
+            )
+        
+        # Report contents
+        with st.expander("📋 Report Contents"):
+            st.markdown("""
+            **Comprehensive Excel Report includes:**
+            - 📊 **Executive Summary**: Key metrics and configuration
+            - 📈 **Detailed Forecasts**: All model predictions with dates
+            - 🎯 **Model Performance**: Comprehensive accuracy metrics
+            - 🤝 **Ensemble Weights**: Model contribution analysis
+            """)
+        
+        # Final insights
+        st.header("💡 Key Insights & Recommendations")
+        
+        insights = []
+        
+        # Growth insight
+        if yoy_growth > 10:
+            insights.append(f"📈 **Strong Growth Expected**: {yoy_growth:.1f}% YoY increase projected")
+        elif yoy_growth < -10:
+            insights.append(f"📉 **Significant Decline Warning**: {yoy_growth:.1f}% YoY decrease projected")
+        
+        # Seasonality insight
+        if 'Weighted_Ensemble' in result_df.columns:
+            peak_month = result_df.loc[result_df['Weighted_Ensemble'].idxmax(), 'Month'].strftime('%B')
+            low_month = result_df.loc[result_df['Weighted_Ensemble'].idxmin(), 'Month'].strftime('%B')
+            insights.append(f"📊 **Seasonal Pattern**: Peak in {peak_month}, lowest in {low_month}")
+        
+        # Model consensus
+        forecast_cols = [col for col in result_df.columns if '_Forecast' in col]
+        if len(forecast_cols) > 1 and 'Weighted_Ensemble' in result_df.columns:
+            forecast_array = result_df[forecast_cols].values
+            cv_by_month = np.std(forecast_array, axis=1) / np.mean(forecast_array, axis=1)
+            avg_cv = np.mean(cv_by_month)
+            if avg_cv < 0.1:
+                insights.append("✅ **High Model Consensus**: All models strongly agree")
+            elif avg_cv > 0.2:
+                insights.append("⚠️ **Model Divergence**: Consider reviewing outlier predictions")
+        
+        # Display insights
+        for insight in insights:
+            st.info(insight)
+        
+        # Success message
+        st.success("✅ Forecasting complete! Results are ready for download.")
+
+
+if __name__ == "__main__":
+    main()
         st.header("🔮 Generating Advanced Forecasts...")
         
         # Initialize progress tracking
