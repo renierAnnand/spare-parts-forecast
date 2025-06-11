@@ -1593,7 +1593,7 @@ def run_croston_forecast(data, forecast_periods=12, scaling_factor=1.0):
         forecasts = np.maximum(forecasts, 0) * scaling_factor
         
         # Croston's method doesn't provide a standard error or AIC
-        # We return a placeholder score and no interval info
+        # We return a placeholder score and no interval info.
         st.session_state['Croston_forecast_info'] = { # Store in session state
             'values': forecasts,
             'lower_bound': np.full_like(forecasts, np.nan), # No direct intervals
@@ -1930,9 +1930,8 @@ def create_forecast_plot(result_df, forecast_year, historical_df=None):
         horizontal_spacing=0.1,
         # Ensure consistent x-axes for date plots
         shared_xaxes=False, # Set to False so each subplot can have its own x-range if needed
-        subplot_titles_font_size=14, # Adjust font size
-        x_title="Date", # Common X title
-        y_title="Sales" # Common Y title
+        subplot_titles_font_size=14 # Adjust font size
+        # Removed x_title="Date", y_title="Sales" from here as they are not supported by make_subplots directly
     )
     
     # Main forecast comparison (Row 1, Col 1)
@@ -3215,4 +3214,3 @@ import itertools # For Prophet's parameter grid combination
 
 if __name__ == "__main__":
     main()
-
