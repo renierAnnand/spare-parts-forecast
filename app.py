@@ -1,5 +1,277 @@
-# Apply inverse transformations
-        if 'transformation' in work_data.columns:
+import streamlit as st
+
+# Configure streamlit FIRST
+st.set_page_config(page_title="Advanced AI Sales Forecasting System", layout="wide")
+
+import pandas as pd
+import numpy as np
+import logging
+from datetime import datetime
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+import io
+from scipy import stats
+import gc
+import hashlib
+
+# Forecasting libraries
+from prophet import Prophet
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.tsa.seasonal import seasonal_decompose
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from statsmodels.tsa.forecasting.theta import ThetaModel
+
+# Machine learning libraries
+from sklearn.ensemble import RandomForestRegressor, IsolationForest
+from sklearn.metrics import mean_absolute_error, mean_squared_error, mean_absolute_percentage_error
+from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
+from sklearn.preprocessing import RobustScaler, MinMaxScaler
+from sklearn.linear_model import Ridge, HuberRegressor
+from sklearn.base import BaseEstimator, RegressorMixin
+
+# Try to import optional libraries
+try:
+    import xgboost as xgb
+    XGBOOST_AVAILABLE = True
+except ImportError:
+    XGBOOST_AVAILABLE = False
+
+try:
+    import tensorflow as tf
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import LSTM, Dense, Dropout
+    from tensorflow.keras.callbacks import EarlyStopping
+    TENSORFLOW_AVAILABLE = True
+except ImportError:
+    TENSORFLOW_AVAILABLE = False
+
+import warnings
+warnings.filterwarnings("ignore")
+
+# Initialize logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+class AdvancedMetaLearner(BaseEstimator, RegressorMixin):
+    """Advanced meta-learner with Ridge regression"""
+    def __init__(self, alpha=1.0):
+        self.alpha = alpha
+        self.model = None
+        
+    def fit(self, X, y):
+        self.model = Ridge(alpha=self.alpha)
+        self.model.fit(X, y)
+        return self
+    
+    def predict(self, X):
+        return self.model.predict(X)
+
+
+@st.cache_data(ttl=3600)
+def load_data_optimized(file_content, file_hash):
+    """Load and preprocess data with optimization"""
+    try:
+        df = pd.read_excel(io.BytesIO(file_content))
+    except Exception:
+        st.error("Could not read the uploaded file. Please ensure it's a valid Excel file.")
+        return None
+
+    if "Month" not in df.columns or "Sales" not in df.columns:
+        st.error("The file must contain 'Month' and 'Sales' columns.")
+        return None
+
+    # Parse dates
+    df["Month"] = pd.to_datetime(df["Month"], errors="coerce")
+    if df["Month"].isna().any():
+        st.error("Some dates could not be parsed. Please check the 'Month' column format.")
+        return None
+
+    # Clean sales data
+    df["Sales"] = pd.to_numeric(df["Sales"], errors="coerce").fillna(0)
+    df["Sales"] = df["Sales"].abs()
+
+    # Sort by date
+    df = df.sort_values("Month").reset_index(drop=True)
+    
+    # Check if there are multiple entries per month
+    original_rows = len(df)
+    unique_months = df['Month'].nunique()
+    
+    if original_rows > unique_months:
+        st.info(f"📊 Aggregating {original_rows} data points into {unique_months} monthly totals...")
+        
+        # Aggregate by month
+        df_monthly = df.groupby('Month', as_index=False).agg({
+            'Sales': 'sum'
+        }).sort_values('Month').reset_index(drop=True)
+        
+        df_monthly['Sales_Original'] = df_monthly['Sales'].copy()
+        df_processed = advanced_preprocess_data(df_monthly)
+        st.success(f"✅ Successfully aggregated to {len(df_processed)} monthly data points")
+    else:
+        df_processed = advanced_preprocess_data(df)
+    
+    return df_processed
+
+
+def advanced_preprocess_data(df):
+    """Enhanced data preprocessing with multiple techniques"""
+    df = df.copy()
+    df['Sales_Original'] = df['Sales'].copy()
+    
+    # Outlier detection using IQR method
+    Q1 = df['Sales'].quantile(0.25)
+    Q3 = df['Sales'].quantile(0.75)
+    IQR = Q3 - Q1
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
+    outliers = ((df['Sales'] < lower_bound) | (df['Sales'] > upper_bound))
+    
+    if outliers.sum() > 0:
+        st.info(f"📊 Detected {outliers.sum()} outliers using IQR method")
+        df.loc[outliers, 'Sales'] = df.loc[~outliers, 'Sales'].quantile(0.95)
+    
+    # Handle missing values
+    if df['Sales'].isna().any():
+        df['Sales'] = df['Sales'].fillna(df['Sales'].mean())
+    
+    # Advanced transformation selection
+    transformations = {
+        'none': df['Sales'].copy(),
+        'log': np.log1p(df['Sales']),
+        'sqrt': np.sqrt(df['Sales']),
+        'boxcox': stats.boxcox(df['Sales'] + 1)[0] if (df['Sales'] > 0).all() else df['Sales']
+    }
+    
+    # Select best transformation based on normality
+    best_transform = 'none'
+    best_normality = 0
+    
+    for transform_name, transformed_data in transformations.items():
+        try:
+            _, p_value = stats.normaltest(transformed_data)
+            if p_value > best_normality:
+                best_normality = p_value
+                best_transform = transform_name
+        except:
+            continue
+    
+    if best_transform != 'none':
+        st.info(f"📊 Applied {best_transform} transformation for better modeling")
+        df['Sales'] = transformations[best_transform]
+        df['transformation'] = best_transform
+        if best_transform == 'boxcox':
+            df['transformation_params'] = {'lambda': stats.boxcox(df['Sales_Original'] + 1)[1]}
+        else:
+            df['transformation_params'] = {'method': best_transform}
+    else:
+        df['transformation'] = 'none'
+        df['transformation_params'] = {'method': 'none'}
+    
+    # Add cyclical encoding for months
+    df['month'] = df['Month'].dt.month
+    df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
+    df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
+    
+    return df
+
+
+def create_advanced_features(df):
+    """Create comprehensive features for ML models"""
+    df = df.copy()
+    
+    # Time features
+    df['year'] = df['Month'].dt.year
+    df['quarter'] = df['Month'].dt.quarter
+    df['dayofyear'] = df['Month'].dt.dayofyear
+    df['weekofyear'] = df['Month'].dt.isocalendar().week
+    
+    # Lag features
+    lag_features = [1, 2, 3, 6, 12] if len(df) > 12 else [1, 3, 6]
+    for lag in lag_features:
+        if lag < len(df):
+            df[f'lag_{lag}'] = df['Sales'].shift(lag)
+    
+    # Rolling statistics
+    windows = [3, 6, 12] if len(df) > 12 else [3, 6]
+    for window in windows:
+        if window < len(df):
+            df[f'rolling_mean_{window}'] = df['Sales'].rolling(window=window, min_periods=1).mean()
+            df[f'rolling_std_{window}'] = df['Sales'].rolling(window=window, min_periods=1).std()
+            df[f'rolling_min_{window}'] = df['Sales'].rolling(window=window, min_periods=1).min()
+            df[f'rolling_max_{window}'] = df['Sales'].rolling(window=window, min_periods=1).max()
+    
+    # Trend features
+    df['trend'] = np.arange(len(df))
+    df['trend_squared'] = df['trend'] ** 2
+    
+    # Growth rates
+    df['mom_growth'] = df['Sales'].pct_change(1)
+    if len(df) > 12:
+        df['yoy_growth'] = df['Sales'].pct_change(12)
+    
+    return df
+
+
+def inv_boxcox(y, lambda_param):
+    """Inverse Box-Cox transformation"""
+    if lambda_param == 0:
+        return np.exp(y)
+    else:
+        return np.exp(np.log(lambda_param * y + 1) / lambda_param)
+
+
+def run_croston_forecast(data, forecast_periods=12, scaling_factor=1.0):
+    """Croston's method for intermittent demand"""
+    try:
+        work_data = data.copy()
+        
+        # Check if data is intermittent
+        zero_ratio = (work_data['Sales'] == 0).sum() / len(work_data)
+        
+        if zero_ratio < 0.3:
+            st.info("Data doesn't appear intermittent. Croston's method may not be optimal.")
+        
+        alpha = 0.2  # Smoothing parameter
+        
+        # Extract non-zero demands and intervals
+        demand = work_data['Sales'].values
+        demands = []
+        intervals = []
+        
+        last_demand_idx = -1
+        for i, d in enumerate(demand):
+            if d > 0:
+                if last_demand_idx >= 0:
+                    intervals.append(i - last_demand_idx)
+                demands.append(d)
+                last_demand_idx = i
+        
+        if not demands:
+            return np.zeros(forecast_periods), np.inf
+        
+        # Initialize with averages
+        avg_demand = np.mean(demands)
+        avg_interval = np.mean(intervals) if intervals else 1
+        
+        # Apply exponential smoothing
+        smoothed_demand = avg_demand
+        smoothed_interval = avg_interval
+        
+        for i in range(1, len(demands)):
+            smoothed_demand = alpha * demands[i] + (1 - alpha) * smoothed_demand
+            if i < len(intervals):
+                smoothed_interval = alpha * intervals[i] + (1 - alpha) * smoothed_interval
+        
+        # Generate forecasts
+        forecast_value = smoothed_demand / smoothed_interval if smoothed_interval > 0 else smoothed_demand
+        forecasts = np.full(forecast_periods, forecast_value)
+        
+        # Apply inverse transformations
+        work_columns = work_data.columns.tolist()
+        if 'transformation' in work_columns:
             transform_method = work_data['transformation'].iloc[0]
             if transform_method == 'log':
                 forecasts = np.expm1(forecasts)
@@ -56,7 +328,8 @@ def run_fallback_forecast(data, forecast_periods=12, scaling_factor=1.0):
             forecast = np.maximum(forecast, 0)
         
         # Apply inverse transformations
-        if 'transformation' in work_data.columns:
+        work_columns = work_data.columns.tolist()
+        if 'transformation' in work_columns:
             transform_method = work_data['transformation'].iloc[0]
             if transform_method == 'log':
                 forecast = np.expm1(forecast)
@@ -71,6 +344,472 @@ def run_fallback_forecast(data, forecast_periods=12, scaling_factor=1.0):
         # Ultimate fallback
         historical_mean = data['Sales'].mean() if len(data) > 0 else 1000
         return np.array([historical_mean * scaling_factor] * forecast_periods)
+
+
+def run_advanced_sarima_forecast(data, forecast_periods=12, scaling_factor=1.0):
+    """SARIMA forecasting with automatic parameter selection"""
+    try:
+        work_data = data.copy()
+        
+        # Try auto ARIMA first
+        try:
+            from pmdarima import auto_arima
+            
+            auto_model = auto_arima(
+                work_data['Sales'],
+                start_p=0, start_q=0, max_p=2, max_q=2,
+                seasonal=True, m=12, start_P=0, start_Q=0,
+                max_P=1, max_Q=1, trace=False,
+                error_action='ignore', suppress_warnings=True,
+                stepwise=True
+            )
+            
+            best_order = auto_model.order
+            best_seasonal_order = auto_model.seasonal_order
+        
+        except ImportError:
+            # Default parameters if pmdarima not available
+            best_order = (1, 1, 1)
+            best_seasonal_order = (1, 1, 1, 12)
+        
+        # Fit SARIMA model
+        model = SARIMAX(
+            work_data['Sales'],
+            order=best_order,
+            seasonal_order=best_seasonal_order,
+            enforce_stationarity=False,
+            enforce_invertibility=False
+        )
+        fitted_model = model.fit(disp=False)
+        
+        # Generate forecast
+        forecast = fitted_model.forecast(steps=forecast_periods)
+        
+        # Apply inverse transformations
+        work_columns = work_data.columns.tolist()
+        if 'transformation' in work_columns:
+            transform_method = work_data['transformation'].iloc[0]
+            if transform_method == 'log':
+                forecast = np.expm1(forecast)
+            elif transform_method == 'sqrt':
+                forecast = forecast ** 2
+            elif transform_method == 'boxcox':
+                params = work_data['transformation_params'].iloc[0]
+                if isinstance(params, dict) and 'lambda' in params:
+                    lambda_param = params['lambda']
+                    forecast = inv_boxcox(forecast, lambda_param)
+        
+        forecast = np.maximum(forecast, 0) * scaling_factor
+        
+        return forecast, fitted_model.aic
+        
+    except Exception as e:
+        st.warning(f"SARIMA failed: {str(e)}")
+        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+
+
+def run_advanced_prophet_forecast(data, forecast_periods=12, scaling_factor=1.0):
+    """Enhanced Prophet forecasting"""
+    try:
+        work_data = data.copy()
+        
+        # Prepare data for Prophet
+        prophet_data = work_data[['Month', 'Sales']].rename(columns={'Month': 'ds', 'Sales': 'y'})
+        
+        # Create Prophet model
+        model = Prophet(
+            changepoint_prior_scale=0.05,
+            seasonality_prior_scale=10.0,
+            seasonality_mode='additive',
+            yearly_seasonality=True,
+            weekly_seasonality=False,
+            daily_seasonality=False,
+            interval_width=0.95
+        )
+        
+        # Add custom seasonality
+        model.add_seasonality(name='quarterly', period=91.25, fourier_order=3)
+        
+        # Fit model
+        model.fit(prophet_data)
+        
+        # Make predictions
+        future = model.make_future_dataframe(periods=forecast_periods, freq='MS')
+        forecast = model.predict(future)
+        forecast_values = forecast['yhat'].tail(forecast_periods).values
+        
+        # Apply inverse transformations
+        work_columns = work_data.columns.tolist()
+        if 'transformation' in work_columns:
+            transform_method = work_data['transformation'].iloc[0]
+            if transform_method == 'log':
+                forecast_values = np.expm1(forecast_values)
+            elif transform_method == 'sqrt':
+                forecast_values = forecast_values ** 2
+        
+        forecast_values = np.maximum(forecast_values, 0) * scaling_factor
+        
+        return forecast_values, 100.0
+        
+    except Exception as e:
+        st.warning(f"Prophet failed: {str(e)}")
+        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+
+
+def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0):
+    """ETS forecasting with automatic model selection"""
+    try:
+        work_data = data.copy()
+        
+        # Test different ETS configurations
+        configs = [
+            {'seasonal': 'add', 'trend': 'add', 'damped_trend': True},
+            {'seasonal': 'add', 'trend': 'add', 'damped_trend': False},
+            {'seasonal': 'mul', 'trend': 'add', 'damped_trend': False},
+            {'seasonal': 'add', 'trend': None},
+            {'seasonal': None, 'trend': 'add'}
+        ]
+        
+        best_model = None
+        best_aic = np.inf
+        
+        for config in configs:
+            try:
+                model = ExponentialSmoothing(
+                    work_data['Sales'].values,
+                    seasonal=config.get('seasonal'),
+                    seasonal_periods=12 if config.get('seasonal') else None,
+                    trend=config.get('trend'),
+                    damped_trend=config.get('damped_trend', False),
+                    initialization_method='estimated'
+                )
+                
+                fitted_model = model.fit(optimized=True)
+                
+                if fitted_model.aic < best_aic:
+                    best_aic = fitted_model.aic
+                    best_model = fitted_model
+            except:
+                continue
+        
+        if best_model is not None:
+            forecast = best_model.forecast(steps=forecast_periods)
+            
+            # Apply inverse transformations
+            work_columns = work_data.columns.tolist()
+            if 'transformation' in work_columns:
+                transform_method = work_data['transformation'].iloc[0]
+                if transform_method == 'log':
+                    forecast = np.expm1(forecast)
+                elif transform_method == 'sqrt':
+                    forecast = forecast ** 2
+                elif transform_method == 'boxcox':
+                    params = work_data['transformation_params'].iloc[0]
+                    if isinstance(params, dict) and 'lambda' in params:
+                        lambda_param = params['lambda']
+                        forecast = inv_boxcox(forecast, lambda_param)
+            
+            forecast = np.maximum(forecast, 0) * scaling_factor
+            
+            return forecast, best_aic
+        else:
+            raise ValueError("All ETS configurations failed")
+            
+    except Exception as e:
+        st.warning(f"ETS failed: {str(e)}")
+        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+
+
+def run_advanced_xgboost_forecast(data, forecast_periods=12, scaling_factor=1.0):
+    """XGBoost forecasting with feature engineering"""
+    if not XGBOOST_AVAILABLE:
+        st.warning("XGBoost not installed.")
+        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+    
+    try:
+        work_data = data.copy()
+        
+        # Create features
+        featured_data = create_advanced_features(work_data)
+        featured_data = featured_data.dropna()
+        
+        if len(featured_data) < 12:
+            st.warning("Insufficient data for XGBoost.")
+            return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+        
+        # Define features and target
+        feature_cols = [col for col in featured_data.columns if col not in [
+            'Month', 'Sales', 'Sales_Original', 'transformation', 'transformation_params', 'month'
+        ]]
+        
+        X = featured_data[feature_cols]
+        y = featured_data['Sales']
+        
+        # Feature scaling
+        scaler = RobustScaler()
+        X_scaled = scaler.fit_transform(X)
+        
+        # Simple parameter grid
+        param_grid = {
+            'n_estimators': [100, 200],
+            'max_depth': [4, 6],
+            'learning_rate': [0.05, 0.1]
+        }
+        
+        # Time series cross-validation
+        tscv = TimeSeriesSplit(n_splits=3)
+        
+        xgb_model = xgb.XGBRegressor(objective='reg:squarederror', random_state=42)
+        
+        grid_search = GridSearchCV(
+            xgb_model, param_grid, cv=tscv, scoring='neg_mean_absolute_error', n_jobs=-1
+        )
+        
+        grid_search.fit(X_scaled, y)
+        best_model = grid_search.best_estimator_
+        best_score = -grid_search.best_score_
+        
+        # Feature importance
+        feature_importance = pd.DataFrame({
+            'feature': feature_cols,
+            'importance': best_model.feature_importances_
+        }).sort_values('importance', ascending=False)
+        
+        # Generate recursive forecasts
+        last_known_features = featured_data.iloc[-1].copy()
+        predictions = []
+        
+        for i in range(forecast_periods):
+            # Update temporal features
+            next_month = last_known_features['Month'] + pd.DateOffset(months=1)
+            
+            # Create feature dictionary
+            feature_dict = {
+                'year': next_month.year,
+                'quarter': next_month.quarter,
+                'dayofyear': next_month.dayofyear,
+                'weekofyear': next_month.isocalendar()[1],
+                'month_sin': np.sin(2 * np.pi * next_month.month / 12),
+                'month_cos': np.cos(2 * np.pi * next_month.month / 12),
+                'trend': featured_data['trend'].max() + i + 1,
+                'trend_squared': (featured_data['trend'].max() + i + 1) ** 2
+            }
+            
+            # Add lag features
+            for lag in [1, 2, 3, 6, 12]:
+                if f'lag_{lag}' in feature_cols:
+                    if i >= lag:
+                        feature_dict[f'lag_{lag}'] = predictions[i - lag]
+                    else:
+                        recent_idx = len(featured_data) - (lag - i)
+                        if recent_idx >= 0:
+                            feature_dict[f'lag_{lag}'] = featured_data.iloc[recent_idx]['Sales']
+                        else:
+                            feature_dict[f'lag_{lag}'] = featured_data['Sales'].mean()
+            
+            # Add rolling features
+            for window in [3, 6, 12]:
+                if f'rolling_mean_{window}' in feature_cols:
+                    recent_values = list(featured_data['Sales'].tail(window - 1)) + predictions[:i]
+                    if len(recent_values) >= window:
+                        feature_dict[f'rolling_mean_{window}'] = np.mean(recent_values[-window:])
+                        feature_dict[f'rolling_std_{window}'] = np.std(recent_values[-window:])
+                        feature_dict[f'rolling_min_{window}'] = np.min(recent_values[-window:])
+                        feature_dict[f'rolling_max_{window}'] = np.max(recent_values[-window:])
+                    else:
+                        feature_dict[f'rolling_mean_{window}'] = np.mean(recent_values) if recent_values else featured_data['Sales'].mean()
+                        feature_dict[f'rolling_std_{window}'] = np.std(recent_values) if len(recent_values) > 1 else 0
+                        feature_dict[f'rolling_min_{window}'] = np.min(recent_values) if recent_values else featured_data['Sales'].min()
+                        feature_dict[f'rolling_max_{window}'] = np.max(recent_values) if recent_values else featured_data['Sales'].max()
+            
+            # Add other features
+            for col in feature_cols:
+                if col not in feature_dict:
+                    if col in last_known_features:
+                        feature_dict[col] = last_known_features[col]
+                    else:
+                        feature_dict[col] = 0
+            
+            # Create feature vector
+            feature_vector = np.array([feature_dict.get(col, 0) for col in feature_cols]).reshape(1, -1)
+            feature_vector_scaled = scaler.transform(feature_vector)
+            
+            # Make prediction
+            pred = best_model.predict(feature_vector_scaled)[0]
+            predictions.append(pred)
+            
+            # Update last known features
+            last_known_features = last_known_features.copy()
+            last_known_features['Month'] = next_month
+            last_known_features['Sales'] = pred
+        
+        forecasts = np.array(predictions)
+        
+        # Apply inverse transformations
+        work_columns = work_data.columns.tolist()
+        if 'transformation' in work_columns:
+            transform_method = work_data['transformation'].iloc[0]
+            if transform_method == 'log':
+                forecasts = np.expm1(forecasts)
+            elif transform_method == 'sqrt':
+                forecasts = forecasts ** 2
+            elif transform_method == 'boxcox':
+                params = work_data['transformation_params'].iloc[0]
+                if isinstance(params, dict) and 'lambda' in params:
+                    lambda_param = params['lambda']
+                    forecasts = inv_boxcox(forecasts, lambda_param)
+        
+        forecasts = np.maximum(forecasts, 0) * scaling_factor
+        
+        # Store forecast info
+        forecast_info = {
+            'values': forecasts,
+            'feature_importance': feature_importance,
+            'model_params': grid_search.best_params_,
+            'cv_score': best_score
+        }
+        
+        st.session_state['xgboost_info'] = forecast_info
+        
+        return forecasts, best_score
+        
+    except Exception as e:
+        st.warning(f"XGBoost failed: {str(e)}")
+        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+
+
+def run_lstm_forecast(data, forecast_periods=12, scaling_factor=1.0):
+    """LSTM neural network forecasting"""
+    if not TENSORFLOW_AVAILABLE:
+        st.warning("TensorFlow not available.")
+        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+    
+    try:
+        work_data = data.copy()
+        
+        # Prepare data
+        sales_data = work_data['Sales'].values.reshape(-1, 1)
+        
+        # Scale data
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaled_data = scaler.fit_transform(sales_data)
+        
+        # Create sequences
+        sequence_length = min(12, len(work_data) // 3)
+        
+        def create_sequences(data, seq_length):
+            X, y = [], []
+            for i in range(len(data) - seq_length):
+                X.append(data[i:i+seq_length])
+                y.append(data[i+seq_length])
+            return np.array(X), np.array(y)
+        
+        X, y = create_sequences(scaled_data, sequence_length)
+        
+        if len(X) < 10:
+            st.warning("Insufficient data for LSTM.")
+            return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+        
+        # Split data
+        train_size = int(len(X) * 0.8)
+        X_train, X_val = X[:train_size], X[train_size:]
+        y_train, y_val = y[:train_size], y[train_size:]
+        
+        # Build LSTM model
+        model = Sequential([
+            LSTM(50, activation='tanh', return_sequences=True, input_shape=(sequence_length, 1)),
+            Dropout(0.2),
+            LSTM(25, activation='tanh'),
+            Dropout(0.2),
+            Dense(1)
+        ])
+        
+        model.compile(optimizer='adam', loss='mse')
+        
+        # Early stopping
+        early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+        
+        # Train model
+        history = model.fit(
+            X_train, y_train,
+            epochs=50,
+            batch_size=16,
+            validation_data=(X_val, y_val),
+            callbacks=[early_stop],
+            verbose=0
+        )
+        
+        # Generate forecasts
+        last_sequence = scaled_data[-sequence_length:]
+        predictions = []
+        
+        for _ in range(forecast_periods):
+            next_pred = model.predict(last_sequence.reshape(1, sequence_length, 1), verbose=0)
+            predictions.append(next_pred[0, 0])
+            last_sequence = np.append(last_sequence[1:], next_pred).reshape(-1, 1)
+        
+        # Inverse transform
+        predictions = scaler.inverse_transform(np.array(predictions).reshape(-1, 1))
+        forecasts = predictions.flatten()
+        
+        # Apply inverse transformations
+        work_columns = work_data.columns.tolist()
+        if 'transformation' in work_columns:
+            transform_method = work_data['transformation'].iloc[0]
+            if transform_method == 'log':
+                forecasts = np.expm1(forecasts)
+            elif transform_method == 'sqrt':
+                forecasts = forecasts ** 2
+            elif transform_method == 'boxcox':
+                params = work_data['transformation_params'].iloc[0]
+                if isinstance(params, dict) and 'lambda' in params:
+                    lambda_param = params['lambda']
+                    forecasts = inv_boxcox(forecasts, lambda_param)
+        
+        forecasts = np.maximum(forecasts, 0) * scaling_factor
+        
+        val_score = history.history['val_loss'][-1] * 1000
+        
+        return forecasts, val_score
+        
+    except Exception as e:
+        st.warning(f"LSTM failed: {str(e)}")
+        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+
+
+def run_theta_forecast(data, forecast_periods=12, scaling_factor=1.0):
+    """Theta method forecasting"""
+    try:
+        work_data = data.copy()
+        
+        # Fit Theta model
+        model = ThetaModel(work_data['Sales'], period=12)
+        fitted_model = model.fit()
+        
+        # Generate forecast
+        forecast = fitted_model.forecast(forecast_periods)
+        
+        # Apply inverse transformations
+        work_columns = work_data.columns.tolist()
+        if 'transformation' in work_columns:
+            transform_method = work_data['transformation'].iloc[0]
+            if transform_method == 'log':
+                forecast = np.expm1(forecast)
+            elif transform_method == 'sqrt':
+                forecast = forecast ** 2
+            elif transform_method == 'boxcox':
+                params = work_data['transformation_params'].iloc[0]
+                if isinstance(params, dict) and 'lambda' in params:
+                    lambda_param = params['lambda']
+                    forecast = inv_boxcox(forecast, lambda_param)
+        
+        forecast = np.maximum(forecast, 0) * scaling_factor
+        
+        return forecast, 0.0
+        
+    except Exception as e:
+        st.warning(f"Theta method failed: {str(e)}")
+        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
 
 
 def create_advanced_ensemble(forecasts_dict, validation_scores, actual_data=None):
@@ -1114,730 +1853,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()import streamlit as st
-
-# Configure streamlit FIRST
-st.set_page_config(page_title="Advanced AI Sales Forecasting System", layout="wide")
-
-import pandas as pd
-import numpy as np
-import logging
-from datetime import datetime
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
-import io
-from scipy import stats
-import gc
-import hashlib
-
-# Forecasting libraries
-from prophet import Prophet
-from statsmodels.tsa.statespace.sarimax import SARIMAX
-from statsmodels.tsa.seasonal import seasonal_decompose
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
-from statsmodels.tsa.forecasting.theta import ThetaModel
-
-# Machine learning libraries
-from sklearn.ensemble import RandomForestRegressor, IsolationForest
-from sklearn.metrics import mean_absolute_error, mean_squared_error, mean_absolute_percentage_error
-from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
-from sklearn.preprocessing import RobustScaler, MinMaxScaler
-from sklearn.linear_model import Ridge, HuberRegressor
-from sklearn.base import BaseEstimator, RegressorMixin
-
-# Try to import optional libraries
-try:
-    import xgboost as xgb
-    XGBOOST_AVAILABLE = True
-except ImportError:
-    XGBOOST_AVAILABLE = False
-
-try:
-    import tensorflow as tf
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout
-    from tensorflow.keras.callbacks import EarlyStopping
-    TENSORFLOW_AVAILABLE = True
-except ImportError:
-    TENSORFLOW_AVAILABLE = False
-
-import warnings
-warnings.filterwarnings("ignore")
-
-# Initialize logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
-class AdvancedMetaLearner(BaseEstimator, RegressorMixin):
-    """Advanced meta-learner with Ridge regression"""
-    def __init__(self, alpha=1.0):
-        self.alpha = alpha
-        self.model = None
-        
-    def fit(self, X, y):
-        self.model = Ridge(alpha=self.alpha)
-        self.model.fit(X, y)
-        return self
-    
-    def predict(self, X):
-        return self.model.predict(X)
-
-
-@st.cache_data(ttl=3600)
-def load_data_optimized(file_content, file_hash):
-    """Load and preprocess data with optimization"""
-    try:
-        df = pd.read_excel(io.BytesIO(file_content))
-    except Exception:
-        st.error("Could not read the uploaded file. Please ensure it's a valid Excel file.")
-        return None
-
-    if "Month" not in df.columns or "Sales" not in df.columns:
-        st.error("The file must contain 'Month' and 'Sales' columns.")
-        return None
-
-    # Parse dates
-    df["Month"] = pd.to_datetime(df["Month"], errors="coerce")
-    if df["Month"].isna().any():
-        st.error("Some dates could not be parsed. Please check the 'Month' column format.")
-        return None
-
-    # Clean sales data
-    df["Sales"] = pd.to_numeric(df["Sales"], errors="coerce").fillna(0)
-    df["Sales"] = df["Sales"].abs()
-
-    # Sort by date
-    df = df.sort_values("Month").reset_index(drop=True)
-    
-    # Check if there are multiple entries per month
-    original_rows = len(df)
-    unique_months = df['Month'].nunique()
-    
-    if original_rows > unique_months:
-        st.info(f"📊 Aggregating {original_rows} data points into {unique_months} monthly totals...")
-        
-        # Aggregate by month
-        df_monthly = df.groupby('Month', as_index=False).agg({
-            'Sales': 'sum'
-        }).sort_values('Month').reset_index(drop=True)
-        
-        df_monthly['Sales_Original'] = df_monthly['Sales'].copy()
-        df_processed = advanced_preprocess_data(df_monthly)
-        st.success(f"✅ Successfully aggregated to {len(df_processed)} monthly data points")
-    else:
-        df_processed = advanced_preprocess_data(df)
-    
-    return df_processed
-
-
-def advanced_preprocess_data(df):
-    """Enhanced data preprocessing with multiple techniques"""
-    df = df.copy()
-    df['Sales_Original'] = df['Sales'].copy()
-    
-    # Outlier detection using IQR method
-    Q1 = df['Sales'].quantile(0.25)
-    Q3 = df['Sales'].quantile(0.75)
-    IQR = Q3 - Q1
-    lower_bound = Q1 - 1.5 * IQR
-    upper_bound = Q3 + 1.5 * IQR
-    outliers = ((df['Sales'] < lower_bound) | (df['Sales'] > upper_bound))
-    
-    if outliers.sum() > 0:
-        st.info(f"📊 Detected {outliers.sum()} outliers using IQR method")
-        df.loc[outliers, 'Sales'] = df.loc[~outliers, 'Sales'].quantile(0.95)
-    
-    # Handle missing values
-    if df['Sales'].isna().any():
-        df['Sales'] = df['Sales'].fillna(df['Sales'].mean())
-    
-    # Advanced transformation selection
-    transformations = {
-        'none': df['Sales'].copy(),
-        'log': np.log1p(df['Sales']),
-        'sqrt': np.sqrt(df['Sales']),
-        'boxcox': stats.boxcox(df['Sales'] + 1)[0] if (df['Sales'] > 0).all() else df['Sales']
-    }
-    
-    # Select best transformation based on normality
-    best_transform = 'none'
-    best_normality = 0
-    
-    for transform_name, transformed_data in transformations.items():
-        try:
-            _, p_value = stats.normaltest(transformed_data)
-            if p_value > best_normality:
-                best_normality = p_value
-                best_transform = transform_name
-        except:
-            continue
-    
-    if best_transform != 'none':
-        st.info(f"📊 Applied {best_transform} transformation for better modeling")
-        df['Sales'] = transformations[best_transform]
-        df['transformation'] = best_transform
-        if best_transform == 'boxcox':
-            df['transformation_params'] = {'lambda': stats.boxcox(df['Sales_Original'] + 1)[1]}
-        else:
-            df['transformation_params'] = {'method': best_transform}
-    else:
-        df['transformation'] = 'none'
-        df['transformation_params'] = {'method': 'none'}
-    
-    # Add cyclical encoding for months
-    df['month'] = df['Month'].dt.month
-    df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
-    df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
-    
-    return df
-
-
-def create_advanced_features(df):
-    """Create comprehensive features for ML models"""
-    df = df.copy()
-    
-    # Time features
-    df['year'] = df['Month'].dt.year
-    df['quarter'] = df['Month'].dt.quarter
-    df['dayofyear'] = df['Month'].dt.dayofyear
-    df['weekofyear'] = df['Month'].dt.isocalendar().week
-    
-    # Lag features
-    lag_features = [1, 2, 3, 6, 12] if len(df) > 12 else [1, 3, 6]
-    for lag in lag_features:
-        if lag < len(df):
-            df[f'lag_{lag}'] = df['Sales'].shift(lag)
-    
-    # Rolling statistics
-    windows = [3, 6, 12] if len(df) > 12 else [3, 6]
-    for window in windows:
-        if window < len(df):
-            df[f'rolling_mean_{window}'] = df['Sales'].rolling(window=window, min_periods=1).mean()
-            df[f'rolling_std_{window}'] = df['Sales'].rolling(window=window, min_periods=1).std()
-            df[f'rolling_min_{window}'] = df['Sales'].rolling(window=window, min_periods=1).min()
-            df[f'rolling_max_{window}'] = df['Sales'].rolling(window=window, min_periods=1).max()
-    
-    # Trend features
-    df['trend'] = np.arange(len(df))
-    df['trend_squared'] = df['trend'] ** 2
-    
-    # Growth rates
-    df['mom_growth'] = df['Sales'].pct_change(1)
-    if len(df) > 12:
-        df['yoy_growth'] = df['Sales'].pct_change(12)
-    
-    return df
-
-
-def inv_boxcox(y, lambda_param):
-    """Inverse Box-Cox transformation"""
-    if lambda_param == 0:
-        return np.exp(y)
-    else:
-        return np.exp(np.log(lambda_param * y + 1) / lambda_param)
-
-
-def run_advanced_sarima_forecast(data, forecast_periods=12, scaling_factor=1.0):
-    """SARIMA forecasting with automatic parameter selection"""
-    try:
-        work_data = data.copy()
-        
-        # Try auto ARIMA first
-        try:
-            from pmdarima import auto_arima
-            
-            auto_model = auto_arima(
-                work_data['Sales'],
-                start_p=0, start_q=0, max_p=2, max_q=2,
-                seasonal=True, m=12, start_P=0, start_Q=0,
-                max_P=1, max_Q=1, trace=False,
-                error_action='ignore', suppress_warnings=True,
-                stepwise=True
-            )
-            
-            best_order = auto_model.order
-            best_seasonal_order = auto_model.seasonal_order
-        
-        except ImportError:
-            # Default parameters if pmdarima not available
-            best_order = (1, 1, 1)
-            best_seasonal_order = (1, 1, 1, 12)
-        
-        # Fit SARIMA model
-        model = SARIMAX(
-            work_data['Sales'],
-            order=best_order,
-            seasonal_order=best_seasonal_order,
-            enforce_stationarity=False,
-            enforce_invertibility=False
-        )
-        fitted_model = model.fit(disp=False)
-        
-        # Generate forecast
-        forecast = fitted_model.forecast(steps=forecast_periods)
-        
-        # Apply inverse transformations
-        if 'transformation' in work_data.columns:
-            transform_method = work_data['transformation'].iloc[0]
-            if transform_method == 'log':
-                forecast = np.expm1(forecast)
-            elif transform_method == 'sqrt':
-                forecast = forecast ** 2
-            elif transform_method == 'boxcox':
-                lambda_param = work_data['transformation_params'].iloc[0].get('lambda', 1)
-                forecast = inv_boxcox(forecast, lambda_param)
-        
-        forecast = np.maximum(forecast, 0) * scaling_factor
-        
-        return forecast, fitted_model.aic
-        
-    except Exception as e:
-        st.warning(f"SARIMA failed: {str(e)}")
-        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
-
-
-def run_advanced_prophet_forecast(data, forecast_periods=12, scaling_factor=1.0):
-    """Enhanced Prophet forecasting"""
-    try:
-        work_data = data.copy()
-        
-        # Prepare data for Prophet
-        prophet_data = work_data[['Month', 'Sales']].rename(columns={'Month': 'ds', 'Sales': 'y'})
-        
-        # Create Prophet model
-        model = Prophet(
-            changepoint_prior_scale=0.05,
-            seasonality_prior_scale=10.0,
-            seasonality_mode='additive',
-            yearly_seasonality=True,
-            weekly_seasonality=False,
-            daily_seasonality=False,
-            interval_width=0.95
-        )
-        
-        # Add custom seasonality
-        model.add_seasonality(name='quarterly', period=91.25, fourier_order=3)
-        
-        # Fit model
-        model.fit(prophet_data)
-        
-        # Make predictions
-        future = model.make_future_dataframe(periods=forecast_periods, freq='MS')
-        forecast = model.predict(future)
-        forecast_values = forecast['yhat'].tail(forecast_periods).values
-        
-        # Apply inverse transformations
-        if 'transformation' in work_data.columns:
-            transform_method = work_data['transformation'].iloc[0]
-            if transform_method == 'log':
-                forecast_values = np.expm1(forecast_values)
-            elif transform_method == 'sqrt':
-                forecast_values = forecast_values ** 2
-        
-        forecast_values = np.maximum(forecast_values, 0) * scaling_factor
-        
-        return forecast_values, 100.0
-        
-    except Exception as e:
-        st.warning(f"Prophet failed: {str(e)}")
-        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
-
-
-def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0):
-    """ETS forecasting with automatic model selection"""
-    try:
-        work_data = data.copy()
-        
-        # Test different ETS configurations
-        configs = [
-            {'seasonal': 'add', 'trend': 'add', 'damped_trend': True},
-            {'seasonal': 'add', 'trend': 'add', 'damped_trend': False},
-            {'seasonal': 'mul', 'trend': 'add', 'damped_trend': False},
-            {'seasonal': 'add', 'trend': None},
-            {'seasonal': None, 'trend': 'add'}
-        ]
-        
-        best_model = None
-        best_aic = np.inf
-        
-        for config in configs:
-            try:
-                model = ExponentialSmoothing(
-                    work_data['Sales'].values,
-                    seasonal=config.get('seasonal'),
-                    seasonal_periods=12 if config.get('seasonal') else None,
-                    trend=config.get('trend'),
-                    damped_trend=config.get('damped_trend', False),
-                    initialization_method='estimated'
-                )
-                
-                fitted_model = model.fit(optimized=True)
-                
-                if fitted_model.aic < best_aic:
-                    best_aic = fitted_model.aic
-                    best_model = fitted_model
-            except:
-                continue
-        
-        if best_model is not None:
-            forecast = best_model.forecast(steps=forecast_periods)
-            
-            # Apply inverse transformations
-            if 'transformation' in work_data.columns:
-                transform_method = work_data['transformation'].iloc[0]
-                if transform_method == 'log':
-                    forecast = np.expm1(forecast)
-                elif transform_method == 'sqrt':
-                    forecast = forecast ** 2
-                elif transform_method == 'boxcox':
-                    lambda_param = work_data['transformation_params'].iloc[0].get('lambda', 1)
-                    forecast = inv_boxcox(forecast, lambda_param)
-            
-            forecast = np.maximum(forecast, 0) * scaling_factor
-            
-            return forecast, best_aic
-        else:
-            raise ValueError("All ETS configurations failed")
-            
-    except Exception as e:
-        st.warning(f"ETS failed: {str(e)}")
-        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
-
-
-def run_advanced_xgboost_forecast(data, forecast_periods=12, scaling_factor=1.0):
-    """XGBoost forecasting with feature engineering"""
-    if not XGBOOST_AVAILABLE:
-        st.warning("XGBoost not installed.")
-        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
-    
-    try:
-        work_data = data.copy()
-        
-        # Create features
-        featured_data = create_advanced_features(work_data)
-        featured_data = featured_data.dropna()
-        
-        if len(featured_data) < 12:
-            st.warning("Insufficient data for XGBoost.")
-            return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
-        
-        # Define features and target
-        feature_cols = [col for col in featured_data.columns if col not in [
-            'Month', 'Sales', 'Sales_Original', 'transformation', 'transformation_params', 'month'
-        ]]
-        
-        X = featured_data[feature_cols]
-        y = featured_data['Sales']
-        
-        # Feature scaling
-        scaler = RobustScaler()
-        X_scaled = scaler.fit_transform(X)
-        
-        # Simple parameter grid
-        param_grid = {
-            'n_estimators': [100, 200],
-            'max_depth': [4, 6],
-            'learning_rate': [0.05, 0.1]
-        }
-        
-        # Time series cross-validation
-        tscv = TimeSeriesSplit(n_splits=3)
-        
-        xgb_model = xgb.XGBRegressor(objective='reg:squarederror', random_state=42)
-        
-        grid_search = GridSearchCV(
-            xgb_model, param_grid, cv=tscv, scoring='neg_mean_absolute_error', n_jobs=-1
-        )
-        
-        grid_search.fit(X_scaled, y)
-        best_model = grid_search.best_estimator_
-        best_score = -grid_search.best_score_
-        
-        # Feature importance
-        feature_importance = pd.DataFrame({
-            'feature': feature_cols,
-            'importance': best_model.feature_importances_
-        }).sort_values('importance', ascending=False)
-        
-        # Generate recursive forecasts
-        last_known_features = featured_data.iloc[-1].copy()
-        predictions = []
-        
-        for i in range(forecast_periods):
-            # Update temporal features
-            next_month = last_known_features['Month'] + pd.DateOffset(months=1)
-            
-            # Create feature dictionary
-            feature_dict = {
-                'year': next_month.year,
-                'quarter': next_month.quarter,
-                'dayofyear': next_month.dayofyear,
-                'weekofyear': next_month.isocalendar()[1],
-                'month_sin': np.sin(2 * np.pi * next_month.month / 12),
-                'month_cos': np.cos(2 * np.pi * next_month.month / 12),
-                'trend': featured_data['trend'].max() + i + 1,
-                'trend_squared': (featured_data['trend'].max() + i + 1) ** 2
-            }
-            
-            # Add lag features
-            for lag in [1, 2, 3, 6, 12]:
-                if f'lag_{lag}' in feature_cols:
-                    if i >= lag:
-                        feature_dict[f'lag_{lag}'] = predictions[i - lag]
-                    else:
-                        recent_idx = len(featured_data) - (lag - i)
-                        if recent_idx >= 0:
-                            feature_dict[f'lag_{lag}'] = featured_data.iloc[recent_idx]['Sales']
-                        else:
-                            feature_dict[f'lag_{lag}'] = featured_data['Sales'].mean()
-            
-            # Add rolling features
-            for window in [3, 6, 12]:
-                if f'rolling_mean_{window}' in feature_cols:
-                    recent_values = list(featured_data['Sales'].tail(window - 1)) + predictions[:i]
-                    if len(recent_values) >= window:
-                        feature_dict[f'rolling_mean_{window}'] = np.mean(recent_values[-window:])
-                        feature_dict[f'rolling_std_{window}'] = np.std(recent_values[-window:])
-                        feature_dict[f'rolling_min_{window}'] = np.min(recent_values[-window:])
-                        feature_dict[f'rolling_max_{window}'] = np.max(recent_values[-window:])
-                    else:
-                        feature_dict[f'rolling_mean_{window}'] = np.mean(recent_values) if recent_values else featured_data['Sales'].mean()
-                        feature_dict[f'rolling_std_{window}'] = np.std(recent_values) if len(recent_values) > 1 else 0
-                        feature_dict[f'rolling_min_{window}'] = np.min(recent_values) if recent_values else featured_data['Sales'].min()
-                        feature_dict[f'rolling_max_{window}'] = np.max(recent_values) if recent_values else featured_data['Sales'].max()
-            
-            # Add other features
-            for col in feature_cols:
-                if col not in feature_dict:
-                    if col in last_known_features:
-                        feature_dict[col] = last_known_features[col]
-                    else:
-                        feature_dict[col] = 0
-            
-            # Create feature vector
-            feature_vector = np.array([feature_dict.get(col, 0) for col in feature_cols]).reshape(1, -1)
-            feature_vector_scaled = scaler.transform(feature_vector)
-            
-            # Make prediction
-            pred = best_model.predict(feature_vector_scaled)[0]
-            predictions.append(pred)
-            
-            # Update last known features
-            last_known_features = last_known_features.copy()
-            last_known_features['Month'] = next_month
-            last_known_features['Sales'] = pred
-        
-        forecasts = np.array(predictions)
-        
-        # Apply inverse transformations
-        if 'transformation' in work_data.columns:
-            transform_method = work_data['transformation'].iloc[0]
-            if transform_method == 'log':
-                forecasts = np.expm1(forecasts)
-            elif transform_method == 'sqrt':
-                forecasts = forecasts ** 2
-            elif transform_method == 'boxcox':
-                lambda_param = work_data['transformation_params'].iloc[0].get('lambda', 1)
-                forecasts = inv_boxcox(forecasts, lambda_param)
-        
-        forecasts = np.maximum(forecasts, 0) * scaling_factor
-        
-        # Store forecast info
-        forecast_info = {
-            'values': forecasts,
-            'feature_importance': feature_importance,
-            'model_params': grid_search.best_params_,
-            'cv_score': best_score
-        }
-        
-        st.session_state['xgboost_info'] = forecast_info
-        
-        return forecasts, best_score
-        
-    except Exception as e:
-        st.warning(f"XGBoost failed: {str(e)}")
-        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
-
-
-def run_lstm_forecast(data, forecast_periods=12, scaling_factor=1.0):
-    """LSTM neural network forecasting"""
-    if not TENSORFLOW_AVAILABLE:
-        st.warning("TensorFlow not available.")
-        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
-    
-    try:
-        work_data = data.copy()
-        
-        # Prepare data
-        sales_data = work_data['Sales'].values.reshape(-1, 1)
-        
-        # Scale data
-        scaler = MinMaxScaler(feature_range=(0, 1))
-        scaled_data = scaler.fit_transform(sales_data)
-        
-        # Create sequences
-        sequence_length = min(12, len(work_data) // 3)
-        
-        def create_sequences(data, seq_length):
-            X, y = [], []
-            for i in range(len(data) - seq_length):
-                X.append(data[i:i+seq_length])
-                y.append(data[i+seq_length])
-            return np.array(X), np.array(y)
-        
-        X, y = create_sequences(scaled_data, sequence_length)
-        
-        if len(X) < 10:
-            st.warning("Insufficient data for LSTM.")
-            return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
-        
-        # Split data
-        train_size = int(len(X) * 0.8)
-        X_train, X_val = X[:train_size], X[train_size:]
-        y_train, y_val = y[:train_size], y[train_size:]
-        
-        # Build LSTM model
-        model = Sequential([
-            LSTM(50, activation='tanh', return_sequences=True, input_shape=(sequence_length, 1)),
-            Dropout(0.2),
-            LSTM(25, activation='tanh'),
-            Dropout(0.2),
-            Dense(1)
-        ])
-        
-        model.compile(optimizer='adam', loss='mse')
-        
-        # Early stopping
-        early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-        
-        # Train model
-        history = model.fit(
-            X_train, y_train,
-            epochs=50,
-            batch_size=16,
-            validation_data=(X_val, y_val),
-            callbacks=[early_stop],
-            verbose=0
-        )
-        
-        # Generate forecasts
-        last_sequence = scaled_data[-sequence_length:]
-        predictions = []
-        
-        for _ in range(forecast_periods):
-            next_pred = model.predict(last_sequence.reshape(1, sequence_length, 1), verbose=0)
-            predictions.append(next_pred[0, 0])
-            last_sequence = np.append(last_sequence[1:], next_pred).reshape(-1, 1)
-        
-        # Inverse transform
-        predictions = scaler.inverse_transform(np.array(predictions).reshape(-1, 1))
-        forecasts = predictions.flatten()
-        
-        # Apply inverse transformations
-        if 'transformation' in work_data.columns:
-            transform_method = work_data['transformation'].iloc[0]
-            if transform_method == 'log':
-                forecasts = np.expm1(forecasts)
-            elif transform_method == 'sqrt':
-                forecasts = forecasts ** 2
-            elif transform_method == 'boxcox':
-                lambda_param = work_data['transformation_params'].iloc[0].get('lambda', 1)
-                forecasts = inv_boxcox(forecasts, lambda_param)
-        
-        forecasts = np.maximum(forecasts, 0) * scaling_factor
-        
-        val_score = history.history['val_loss'][-1] * 1000
-        
-        return forecasts, val_score
-        
-    except Exception as e:
-        st.warning(f"LSTM failed: {str(e)}")
-        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
-
-
-def run_theta_forecast(data, forecast_periods=12, scaling_factor=1.0):
-    """Theta method forecasting"""
-    try:
-        work_data = data.copy()
-        
-        # Fit Theta model
-        model = ThetaModel(work_data['Sales'], period=12)
-        fitted_model = model.fit()
-        
-        # Generate forecast
-        forecast = fitted_model.forecast(forecast_periods)
-        
-        # Apply inverse transformations
-        if 'transformation' in work_data.columns:
-            transform_method = work_data['transformation'].iloc[0]
-            if transform_method == 'log':
-                forecast = np.expm1(forecast)
-            elif transform_method == 'sqrt':
-                forecast = forecast ** 2
-            elif transform_method == 'boxcox':
-                lambda_param = work_data['transformation_params'].iloc[0].get('lambda', 1)
-                forecast = inv_boxcox(forecast, lambda_param)
-        
-        forecast = np.maximum(forecast, 0) * scaling_factor
-        
-        return forecast, 0.0
-        
-    except Exception as e:
-        st.warning(f"Theta method failed: {str(e)}")
-        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
-
-
-def run_croston_forecast(data, forecast_periods=12, scaling_factor=1.0):
-    """Croston's method for intermittent demand"""
-    try:
-        work_data = data.copy()
-        
-        # Check if data is intermittent
-        zero_ratio = (work_data['Sales'] == 0).sum() / len(work_data)
-        
-        if zero_ratio < 0.3:
-            st.info("Data doesn't appear intermittent. Croston's method may not be optimal.")
-        
-        alpha = 0.2  # Smoothing parameter
-        
-        # Extract non-zero demands and intervals
-        demand = work_data['Sales'].values
-        demands = []
-        intervals = []
-        
-        last_demand_idx = -1
-        for i, d in enumerate(demand):
-            if d > 0:
-                if last_demand_idx >= 0:
-                    intervals.append(i - last_demand_idx)
-                demands.append(d)
-                last_demand_idx = i
-        
-        if not demands:
-            return np.zeros(forecast_periods), np.inf
-        
-        # Initialize with averages
-        avg_demand = np.mean(demands)
-        avg_interval = np.mean(intervals) if intervals else 1
-        
-        # Apply exponential smoothing
-        smoothed_demand = avg_demand
-        smoothed_interval = avg_interval
-        
-        for i in range(1, len(demands)):
-            smoothed_demand = alpha * demands[i] + (1 - alpha) * smoothed_demand
-            if i < len(intervals):
-                smoothed_interval = alpha * intervals[i] + (1 - alpha) * smoothed_interval
-        
-        # Generate forecasts
-        forecast_value = smoothed_demand / smoothed_interval if smoothed_interval > 0 else smoothed_demand
-        forecasts = np.full(forecast_periods, forecast_value)
-        
-        # Apply inverse transformations
-        if 'transformation' in work_data.columns:
-            transform_method = work_data['transformation'].iloc[0]
-            if transform_method == 'log':
-                forecasts = np.expm1(forecasts)
-            elif transform_metho
+    main()
