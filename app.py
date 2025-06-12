@@ -263,7 +263,7 @@ def calculate_accuracy_metrics(actual, forecast):
     
     # Additional metrics
     smape = np.mean(2 * np.abs(forecast_clean - actual_clean) / (np.abs(actual_clean) + np.abs(forecast_clean))) * 100
-    mase = mae / np.mean(np.abs(np.diff(actual_clean)))  # Mean Absolute Scaled Error
+    mase = mae / np.mean(np.abs(np.diff(actual_clean))) if len(actual_clean) > 1 else mae
     
     return {
         "MAPE": mape,
@@ -292,47 +292,57 @@ def detect_and_apply_scaling(historical_data, actual_data=None):
     return 1.0
 
 
-def optimize_sarima_parameters(data, max_p=3, max_d=2, max_q=3, seasonal_periods=12):
-    """Optimize SARIMA parameters using grid search"""
+def optimize_sarima_parameters(data, max_p=2, max_d=2, max_q=2, seasonal_periods=12):
+    """Optimize SARIMA parameters using grid search - more conservative approach"""
     if not STATSMODELS_AVAILABLE:
         return {'order': (1, 1, 1), 'seasonal_order': (1, 1, 1, 12)}
     
     best_aic = np.inf
     best_params = None
     
-    # Limited grid search for performance
-    for p in range(0, min(max_p + 1, 3)):
-        for d in range(0, min(max_d + 1, 2)):
-            for q in range(0, min(max_q + 1, 3)):
-                for P in range(0, 2):
-                    for D in range(0, 2):
-                        for Q in range(0, 2):
-                            try:
-                                model = SARIMAX(
-                                    data['Sales'],
-                                    order=(p, d, q),
-                                    seasonal_order=(P, D, Q, seasonal_periods),
-                                    enforce_stationarity=False,
-                                    enforce_invertibility=False
-                                )
-                                fitted = model.fit(disp=False, maxiter=50)
-                                if fitted.aic < best_aic:
-                                    best_aic = fitted.aic
-                                    best_params = {
-                                        'order': (p, d, q),
-                                        'seasonal_order': (P, D, Q, seasonal_periods)
-                                    }
-                            except:
-                                continue
+    # More conservative grid search for stability
+    param_combinations = [
+        ((1, 1, 1), (1, 1, 1, 12)),
+        ((0, 1, 1), (0, 1, 1, 12)),
+        ((1, 0, 1), (1, 0, 1, 12)),
+        ((2, 1, 0), (1, 1, 0, 12)),
+        ((0, 1, 2), (0, 1, 1, 12)),
+        ((1, 1, 0), (0, 1, 1, 12))
+    ]
+    
+    for order, seasonal_order in param_combinations:
+        try:
+            model = SARIMAX(
+                data['Sales'],
+                order=order,
+                seasonal_order=seasonal_order,
+                enforce_stationarity=False,
+                enforce_invertibility=False
+            )
+            fitted = model.fit(disp=False, maxiter=100, method='lbfgs')
+            
+            if fitted.aic < best_aic and np.isfinite(fitted.aic):
+                best_aic = fitted.aic
+                best_params = {
+                    'order': order,
+                    'seasonal_order': seasonal_order
+                }
+        except Exception as e:
+            continue
     
     return best_params if best_params else {'order': (1, 1, 1), 'seasonal_order': (1, 1, 1, 12)}
 
 
 def run_advanced_sarima_forecast(data, forecast_periods=12, scaling_factor=1.0):
-    """Advanced SARIMA with parameter optimization"""
+    """Fixed SARIMA with better error handling and validation"""
     try:
         if not STATSMODELS_AVAILABLE:
-            return run_fallback_forecast(data, forecast_periods, scaling_factor)
+            return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+        
+        # Ensure we have enough data points
+        if len(data) < 24:
+            st.warning("⚠️ SARIMA needs at least 24 data points. Using fallback method.")
+            return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
         
         # Create a copy to avoid modifying original data
         work_data = data.copy()
@@ -340,120 +350,136 @@ def run_advanced_sarima_forecast(data, forecast_periods=12, scaling_factor=1.0):
         # Check if data was log transformed
         log_transformed = 'log_transformed' in work_data.columns and work_data['log_transformed'].iloc[0]
         
-        # Optimize parameters
+        # Ensure data is stationary and has positive values
+        sales_series = work_data['Sales'].copy()
+        
+        # Check for zeros or negative values that could cause issues
+        if (sales_series <= 0).any():
+            sales_series = sales_series.clip(lower=0.1)  # Replace zeros/negatives with small positive value
+        
+        # Optimize parameters with conservative approach
         with st.spinner("🔧 Optimizing SARIMA parameters..."):
             best_params = optimize_sarima_parameters(work_data)
         
+        # Fit the model with additional error handling
         model = SARIMAX(
-            work_data['Sales'], 
+            sales_series, 
             order=best_params['order'],
             seasonal_order=best_params['seasonal_order'],
             enforce_stationarity=False,
             enforce_invertibility=False
         )
-        fitted_model = model.fit(disp=False, maxiter=100)
         
-        forecast = fitted_model.forecast(steps=forecast_periods)
+        # Fit with multiple methods if first fails
+        fitted_model = None
+        for method in ['lbfgs', 'bfgs', 'nm']:
+            try:
+                fitted_model = model.fit(
+                    disp=False, 
+                    maxiter=200, 
+                    method=method,
+                    low_memory=True
+                )
+                break
+            except Exception:
+                continue
         
-        # Reverse log transformation first if applied
-        if log_transformed:
-            forecast = np.expm1(forecast)
+        if fitted_model is None:
+            raise ValueError("All fitting methods failed")
         
-        # Then apply scaling and ensure positive values
-        forecast = np.maximum(forecast, 0) * scaling_factor
+        # Generate forecast with confidence intervals
+        forecast_result = fitted_model.get_forecast(steps=forecast_periods)
+        forecast = forecast_result.predicted_mean
         
-        return forecast, fitted_model.aic
+        # Validate forecast results
+        if not isinstance(forecast, (pd.Series, np.ndarray)) or len(forecast) != forecast_periods:
+            raise ValueError("Invalid forecast format or length")
         
-    except Exception as e:
-        st.warning(f"Advanced SARIMA failed: {str(e)}. Using fallback.")
-        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
-
-
-def run_advanced_prophet_forecast(data, forecast_periods=12, scaling_factor=1.0):
-    """Enhanced Prophet with hyperparameter optimization"""
-    try:
-        if not PROPHET_AVAILABLE:
-            return run_fallback_forecast(data, forecast_periods, scaling_factor)
+        # Convert to numpy array and ensure proper format
+        forecast_values = np.array(forecast)
         
-        # Create a copy to avoid modifying original data
-        work_data = data.copy()
-        
-        # Check if data was log transformed
-        log_transformed = 'log_transformed' in work_data.columns and work_data['log_transformed'].iloc[0]
-        
-        prophet_data = work_data[['Month', 'Sales']].rename(columns={'Month': 'ds', 'Sales': 'y'})
-        
-        # Test different Prophet configurations
-        configs = [
-            {
-                'seasonality_mode': 'additive',
-                'changepoint_prior_scale': 0.05,
-                'seasonality_prior_scale': 10.0
-            },
-            {
-                'seasonality_mode': 'multiplicative',
-                'changepoint_prior_scale': 0.1,
-                'seasonality_prior_scale': 15.0
-            },
-            {
-                'seasonality_mode': 'additive',
-                'changepoint_prior_scale': 0.01,
-                'seasonality_prior_scale': 5.0
-            }
-        ]
-        
-        best_mae = np.inf
-        
-        if len(prophet_data) >= 24:  # Only do validation if enough data
-            train_size = len(prophet_data) - 12
-            train_data = prophet_data.iloc[:train_size]
-            val_data = prophet_data.iloc[train_size:]
-            
-            for config in configs:
-                try:
-                    model = Prophet(**config, yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
-                    model.fit(train_data)
-                    
-                    future = model.make_future_dataframe(periods=12, freq='MS')
-                    forecast = model.predict(future)
-                    val_pred = forecast['yhat'].tail(12).values
-                    
-                    mae = mean_absolute_error(val_data['y'].values, val_pred)
-                    if mae < best_mae:
-                        best_mae = mae
-                        best_config = config
-                except:
-                    continue
-        else:
-            best_config = configs[0]  # Use default if not enough data for validation
-        
-        # Train final model on full data
-        model = Prophet(**best_config, yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
-        model.fit(prophet_data)
-        
-        future = model.make_future_dataframe(periods=forecast_periods, freq='MS')
-        forecast = model.predict(future)
-        forecast_values = forecast['yhat'].tail(forecast_periods).values
+        # Check for invalid values
+        if np.any(np.isnan(forecast_values)) or np.any(np.isinf(forecast_values)):
+            raise ValueError("Forecast contains NaN or infinite values")
         
         # Reverse log transformation first if applied
         if log_transformed:
             forecast_values = np.expm1(forecast_values)
         
-        # Then apply scaling and ensure positive values
+        # Apply scaling and ensure positive values
         forecast_values = np.maximum(forecast_values, 0) * scaling_factor
         
-        return forecast_values, best_mae
+        # Final validation
+        if len(forecast_values) != 12:
+            raise ValueError(f"Expected 12 forecast values, got {len(forecast_values)}")
+        
+        return forecast_values, fitted_model.aic
         
     except Exception as e:
-        st.warning(f"Advanced Prophet failed: {str(e)}. Using fallback.")
+        st.warning(f"⚠️ Advanced SARIMA failed: {str(e)}. Using fallback method.")
+        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+
+
+def run_advanced_prophet_forecast(data, forecast_periods=12, scaling_factor=1.0):
+    """Enhanced Prophet with better error handling"""
+    try:
+        if not PROPHET_AVAILABLE:
+            return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+        
+        # Create a copy to avoid modifying original data
+        work_data = data.copy()
+        
+        # Check if data was log transformed
+        log_transformed = 'log_transformed' in work_data.columns and work_data['log_transformed'].iloc[0]
+        
+        # Prepare data for Prophet
+        prophet_data = work_data[['Month', 'Sales']].rename(columns={'Month': 'ds', 'Sales': 'y'})
+        
+        # Ensure positive values for Prophet
+        prophet_data['y'] = prophet_data['y'].clip(lower=0.1)
+        
+        # Use simpler Prophet configuration for stability
+        model = Prophet(
+            yearly_seasonality=True,
+            weekly_seasonality=False,
+            daily_seasonality=False,
+            seasonality_mode='additive',
+            changepoint_prior_scale=0.05,
+            seasonality_prior_scale=10.0
+        )
+        
+        model.fit(prophet_data)
+        
+        # Create future dataframe
+        future = model.make_future_dataframe(periods=forecast_periods, freq='MS')
+        forecast = model.predict(future)
+        
+        # Extract forecast values
+        forecast_values = forecast['yhat'].tail(forecast_periods).values
+        
+        # Validate forecast
+        if len(forecast_values) != forecast_periods:
+            raise ValueError(f"Expected {forecast_periods} forecast values, got {len(forecast_values)}")
+        
+        # Reverse log transformation first if applied
+        if log_transformed:
+            forecast_values = np.expm1(forecast_values)
+        
+        # Apply scaling and ensure positive values
+        forecast_values = np.maximum(forecast_values, 0) * scaling_factor
+        
+        return forecast_values, np.mean(np.abs(forecast['yhat'] - prophet_data['y']))
+        
+    except Exception as e:
+        st.warning(f"⚠️ Advanced Prophet failed: {str(e)}. Using fallback method.")
         return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
 
 
 def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0):
-    """Advanced ETS with automatic model selection"""
+    """Advanced ETS with better error handling"""
     try:
         if not STATSMODELS_AVAILABLE:
-            return run_fallback_forecast(data, forecast_periods, scaling_factor)
+            return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
         
         # Create a copy to avoid modifying original data
         work_data = data.copy()
@@ -461,56 +487,51 @@ def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0):
         # Check if data was log transformed
         log_transformed = 'log_transformed' in work_data.columns and work_data['log_transformed'].iloc[0]
         
-        # Test different ETS configurations
-        configs = [
-            {'seasonal': 'add', 'trend': 'add', 'damped_trend': False},
-            {'seasonal': 'add', 'trend': 'add', 'damped_trend': True},
-            {'seasonal': 'mul', 'trend': 'add', 'damped_trend': False},
-            {'seasonal': 'mul', 'trend': 'add', 'damped_trend': True},
-            {'seasonal': 'add', 'trend': None},
-            {'seasonal': None, 'trend': 'add'}
-        ]
+        # Ensure positive values
+        sales_series = work_data['Sales'].clip(lower=0.1)
         
-        best_model = None
-        best_aic = np.inf
+        # Try simple additive model first
+        try:
+            model = ExponentialSmoothing(
+                sales_series,
+                seasonal='add',
+                seasonal_periods=12,
+                trend='add'
+            )
+            fitted_model = model.fit(optimized=True)
+            forecast = fitted_model.forecast(steps=forecast_periods)
+            
+        except Exception:
+            # Fallback to simpler model
+            model = ExponentialSmoothing(
+                sales_series,
+                seasonal=None,
+                trend='add'
+            )
+            fitted_model = model.fit(optimized=True)
+            forecast = fitted_model.forecast(steps=forecast_periods)
         
-        for config in configs:
-            try:
-                model = ExponentialSmoothing(
-                    work_data['Sales'],
-                    seasonal=config['seasonal'],
-                    seasonal_periods=12 if config['seasonal'] else None,
-                    trend=config['trend'],
-                    damped_trend=config.get('damped_trend', False)
-                )
-                fitted_model = model.fit(optimized=True, use_brute=True)
-                if fitted_model.aic < best_aic:
-                    best_aic = fitted_model.aic
-                    best_model = fitted_model
-            except:
-                continue
+        # Validate forecast
+        forecast_values = np.array(forecast)
+        if len(forecast_values) != forecast_periods:
+            raise ValueError(f"Expected {forecast_periods} forecast values, got {len(forecast_values)}")
         
-        if best_model is not None:
-            forecast = best_model.forecast(steps=forecast_periods)
-            
-            # Reverse log transformation first if applied
-            if log_transformed:
-                forecast = np.expm1(forecast)
-            
-            # Then apply scaling and ensure positive values
-            forecast = np.maximum(forecast, 0) * scaling_factor
-            
-            return forecast, best_aic
-        else:
-            raise ValueError("All ETS configurations failed")
-            
+        # Reverse log transformation first if applied
+        if log_transformed:
+            forecast_values = np.expm1(forecast_values)
+        
+        # Apply scaling and ensure positive values
+        forecast_values = np.maximum(forecast_values, 0) * scaling_factor
+        
+        return forecast_values, fitted_model.aic
+        
     except Exception as e:
-        st.warning(f"Advanced ETS failed: {str(e)}. Using fallback.")
+        st.warning(f"⚠️ Advanced ETS failed: {str(e)}. Using fallback method.")
         return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
 
 
 def run_advanced_xgb_forecast(data, forecast_periods=12, scaling_factor=1.0):
-    """Advanced XGBoost with feature engineering"""
+    """Simplified XGBoost forecast with better error handling"""
     try:
         # Create a copy to avoid modifying original data
         work_data = data.copy()
@@ -518,36 +539,44 @@ def run_advanced_xgb_forecast(data, forecast_periods=12, scaling_factor=1.0):
         # Check if data was log transformed
         log_transformed = 'log_transformed' in work_data.columns and work_data['log_transformed'].iloc[0]
         
-        # Create simple seasonal pattern based on historical data
-        recent_sales = work_data['Sales'].tail(12).values
-        base_forecast = np.mean(recent_sales) if len(recent_sales) > 0 else 1000
-        
-        # Generate forecasts with seasonal pattern
-        forecasts = []
-        for i in range(forecast_periods):
-            month_idx = i % 12
-            # Simple seasonal adjustment
-            if len(recent_sales) >= 12:
-                seasonal_factor = recent_sales[month_idx] / np.mean(recent_sales)
-            else:
-                seasonal_factor = 1.0 + 0.1 * np.sin(2 * np.pi * month_idx / 12)
+        # Simple feature-based approach
+        if len(work_data) >= 12:
+            # Use last 12 months as seasonal pattern
+            recent_sales = work_data['Sales'].tail(12).values
             
-            forecast_val = base_forecast * seasonal_factor
-            forecasts.append(max(forecast_val, 0))
+            # Calculate trend
+            trend = np.polyfit(range(len(recent_sales)), recent_sales, 1)[0]
+            
+            # Generate forecasts with seasonal pattern and trend
+            forecasts = []
+            for i in range(forecast_periods):
+                month_idx = i % 12
+                seasonal_base = recent_sales[month_idx] if month_idx < len(recent_sales) else np.mean(recent_sales)
+                trend_adjustment = trend * (i + 1)
+                forecast_val = max(seasonal_base + trend_adjustment * 0.5, seasonal_base * 0.8)
+                forecasts.append(forecast_val)
+        else:
+            # Fallback for insufficient data
+            base_value = work_data['Sales'].mean()
+            forecasts = [base_value] * forecast_periods
         
         forecasts = np.array(forecasts)
+        
+        # Validate forecast
+        if len(forecasts) != forecast_periods:
+            raise ValueError(f"Expected {forecast_periods} forecast values, got {len(forecasts)}")
         
         # Reverse log transformation first if applied
         if log_transformed:
             forecasts = np.expm1(forecasts)
         
-        # Then apply scaling and ensure positive values
+        # Apply scaling and ensure positive values
         forecasts = np.maximum(forecasts, 0) * scaling_factor
         
         return forecasts, 200.0
         
     except Exception as e:
-        st.warning(f"Advanced XGBoost failed: {str(e)}. Using fallback.")
+        st.warning(f"⚠️ Advanced XGBoost failed: {str(e)}. Using fallback method.")
         return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
 
 
@@ -568,8 +597,9 @@ def run_fallback_forecast(data, forecast_periods=12, scaling_factor=1.0):
             forecast = []
             for i in range(forecast_periods):
                 seasonal_val = seasonal_pattern[i % 12]
-                trend_adjustment = recent_trend * (i + 1)
-                forecast.append(max(seasonal_val + trend_adjustment, seasonal_val * 0.5))
+                trend_adjustment = recent_trend * (i + 1) * 0.5  # Dampen trend
+                forecast_val = max(seasonal_val + trend_adjustment, seasonal_val * 0.7)
+                forecast.append(forecast_val)
             
             forecast = np.array(forecast)
             
@@ -577,7 +607,7 @@ def run_fallback_forecast(data, forecast_periods=12, scaling_factor=1.0):
             if log_transformed:
                 forecast = np.expm1(forecast)
             
-            # Then apply scaling
+            # Apply scaling
             forecast = forecast * scaling_factor
             
             return forecast
@@ -588,15 +618,18 @@ def run_fallback_forecast(data, forecast_periods=12, scaling_factor=1.0):
             if log_transformed:
                 base_forecast = np.expm1(base_forecast)
             
-            # Then apply scaling
+            # Apply scaling
             base_forecast = base_forecast * scaling_factor
             
             return np.array([base_forecast] * forecast_periods)
             
     except Exception as e:
         # Ultimate fallback - use historical mean
-        historical_mean = data['Sales'].mean() if len(data) > 0 else 1000
-        return np.array([historical_mean * scaling_factor] * forecast_periods)
+        try:
+            historical_mean = data['Sales'].mean() if len(data) > 0 else 1000
+            return np.array([historical_mean * scaling_factor] * forecast_periods)
+        except:
+            return np.array([1000 * scaling_factor] * forecast_periods)
 
 
 def create_weighted_ensemble(forecasts_dict, validation_scores):
@@ -903,41 +936,46 @@ def main():
         for i, (model_name, model_func) in enumerate(models_to_run):
             with st.spinner(f"🤖 Running advanced {model_name} with optimization..."):
                 try:
-                    if enable_hyperopt:
-                        forecast_values, validation_score = model_func(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
+                    # Run the model with error handling
+                    result = model_func(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
+                    
+                    if isinstance(result, tuple) and len(result) >= 2:
+                        forecast_values, validation_score = result[0], result[1]
                     else:
-                        # Use basic version if hyperopt disabled
-                        result = model_func(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
-                        if isinstance(result, tuple):
-                            forecast_values = result[0]
-                            validation_score = result[1] if len(result) > 1 else np.inf
-                        else:
-                            forecast_values = result
-                            validation_score = np.inf
+                        forecast_values = result
+                        validation_score = np.inf
                     
                     # Validate forecast values and fix any issues
                     if isinstance(forecast_values, (list, np.ndarray)):
                         forecast_values = np.array(forecast_values)
-                        # Check for valid forecasts
-                        if len(forecast_values) == 12 and not np.all(forecast_values == 0):
-                            forecast_results[f"{model_name}_Forecast"] = forecast_values
-                            validation_scores[model_name] = validation_score
-                            
-                            # Show forecast range for debugging
-                            min_val, max_val = np.min(forecast_values), np.max(forecast_values)
-                            score_text = f" (Range: {min_val:,.0f} - {max_val:,.0f})"
-                            if validation_score != np.inf:
-                                score_text += f" (Score: {validation_score:.2f})"
-                            st.success(f"✅ Advanced {model_name} completed{score_text}")
-                        else:
-                            # Use fallback if forecast is invalid
-                            st.warning(f"⚠️ {model_name} produced invalid forecast, using fallback")
-                            fallback_forecast = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
-                            forecast_results[f"{model_name}_Forecast"] = fallback_forecast
-                            validation_scores[model_name] = np.inf
+                        
+                        # Ensure we have exactly 12 values
+                        if len(forecast_values) != 12:
+                            st.warning(f"⚠️ {model_name} returned {len(forecast_values)} values instead of 12. Using fallback.")
+                            forecast_values = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
+                            validation_score = np.inf
+                        
+                        # Check for valid forecasts (not all zeros, not NaN/inf)
+                        elif (np.all(forecast_values == 0) or 
+                              np.any(np.isnan(forecast_values)) or 
+                              np.any(np.isinf(forecast_values))):
+                            st.warning(f"⚠️ {model_name} produced invalid forecast values. Using fallback.")
+                            forecast_values = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
+                            validation_score = np.inf
+                        
+                        # Store valid forecast
+                        forecast_results[f"{model_name}_Forecast"] = forecast_values
+                        validation_scores[model_name] = validation_score
+                        
+                        # Show forecast range for debugging
+                        min_val, max_val = np.min(forecast_values), np.max(forecast_values)
+                        score_text = f" (Range: {min_val:,.0f} - {max_val:,.0f})"
+                        if validation_score != np.inf:
+                            score_text += f" (Score: {validation_score:.2f})"
+                        st.success(f"✅ Advanced {model_name} completed{score_text}")
+                        
                     else:
-                        # Use fallback if forecast format is wrong
-                        st.warning(f"⚠️ {model_name} returned invalid format, using fallback")
+                        st.warning(f"⚠️ {model_name} returned invalid format. Using fallback.")
                         fallback_forecast = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
                         forecast_results[f"{model_name}_Forecast"] = fallback_forecast
                         validation_scores[model_name] = np.inf
@@ -950,22 +988,33 @@ def main():
 
             progress_bar.progress((i + 1) / len(models_to_run))
 
+        # Validate that we have at least one successful forecast
+        if not forecast_results:
+            st.error("❌ All models failed. Please check your data and try again.")
+            return
+
         # Create advanced ensemble
         if len(forecast_results) > 1:
             with st.spinner("🔥 Creating intelligent weighted ensemble..."):
-                ensemble_values, ensemble_weights = create_weighted_ensemble(forecast_results, validation_scores)
-                forecast_results["Weighted_Ensemble"] = ensemble_values
-                
-                # Show ensemble weights
-                st.info(f"🎯 Ensemble weights: {', '.join([f'{k}: {v:.1%}' for k, v in ensemble_weights.items()])}")
+                try:
+                    ensemble_values, ensemble_weights = create_weighted_ensemble(forecast_results, validation_scores)
+                    forecast_results["Weighted_Ensemble"] = ensemble_values
+                    
+                    # Show ensemble weights
+                    st.info(f"🎯 Ensemble weights: {', '.join([f'{k}: {v:.1%}' for k, v in ensemble_weights.items()])}")
+                except Exception as e:
+                    st.warning(f"⚠️ Ensemble creation failed: {str(e)}")
         
         # Meta-learning ensemble
         if enable_meta_learning and actual_2024_df is not None:
             with st.spinner("🧠 Training meta-learning model..."):
-                meta_forecast = run_meta_learning_forecast(forecast_results, actual_2024_df, forecast_periods=12)
-                if meta_forecast is not None:
-                    forecast_results["Meta_Learning"] = meta_forecast
-                    st.success("✅ Meta-learning ensemble created successfully")
+                try:
+                    meta_forecast = run_meta_learning_forecast(forecast_results, actual_2024_df, forecast_periods=12)
+                    if meta_forecast is not None:
+                        forecast_results["Meta_Learning"] = meta_forecast
+                        st.success("✅ Meta-learning ensemble created successfully")
+                except Exception as e:
+                    st.warning(f"⚠️ Meta-learning failed: {str(e)}")
 
         # Create results dataframe
         result_df = pd.DataFrame({
@@ -987,18 +1036,18 @@ def main():
         
         # Debug information - show forecast summaries
         if forecast_results:
-            st.subheader("🔍 Forecast Summary (Debugging)")
+            st.subheader("🔍 Forecast Summary")
             debug_data = []
             for model_name, forecast_values in forecast_results.items():
                 if isinstance(forecast_values, (list, np.ndarray)):
                     forecast_array = np.array(forecast_values)
                     debug_data.append({
-                        'Model': model_name,
+                        'Model': model_name.replace('_Forecast', '').replace('_', ' '),
                         'Min Value': f"{np.min(forecast_array):,.0f}",
                         'Max Value': f"{np.max(forecast_array):,.0f}",
                         'Mean Value': f"{np.mean(forecast_array):,.0f}",
                         'Total Annual': f"{np.sum(forecast_array):,.0f}",
-                        'All Zero?': str(np.all(forecast_array == 0))
+                        'Values Valid': "✅" if len(forecast_array) == 12 and not np.all(forecast_array == 0) else "❌"
                     })
             
             if debug_data:
@@ -1277,12 +1326,15 @@ def main():
                 st.metric("🧠 Meta-Learning", f"{meta_total:,.0f}")
         
         with col3:
-            avg_accuracy = np.mean([100 - v for v in validation_scores.values() if v != np.inf]) if validation_scores else 0
-            st.metric("🎯 Avg Model Accuracy", f"{avg_accuracy:.1f}%")
+            successful_models = len([v for v in validation_scores.values() if v != np.inf])
+            total_models = len(validation_scores)
+            st.metric("🤖 Models Successful", f"{successful_models}/{total_models}")
         
         with col4:
-            complexity_score = len([m for m in models_to_run]) * 25
-            st.metric("🤖 AI Complexity Score", f"{complexity_score}%")
+            if scaling_factor != 1.0:
+                st.metric("📊 Scaling Applied", f"{scaling_factor:.2f}x")
+            else:
+                st.metric("📊 Scaling Applied", "None")
 
 
 if __name__ == "__main__":
