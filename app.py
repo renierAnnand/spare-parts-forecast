@@ -1132,7 +1132,8 @@ def main():
             models_to_run.append(("LSTM", run_lstm_forecast))
         
         # Progress tracking
-        total_steps = len(models_to_run) + (2 if use_ensemble else 0)
+        ensemble_steps = 2 if use_ensemble else 0
+        total_steps = len(models_to_run) + ensemble_steps
         progress_bar = st.progress(0)
         status_text = st.empty()
         
@@ -1200,20 +1201,25 @@ def main():
             freq='MS'
         )
         
-        result_df = pd.DataFrame({
-            'Month': forecast_dates,
-            **forecast_results
-        })
+        result_df = pd.DataFrame({'Month': forecast_dates})
+        
+        # Add forecast results
+        for key, values in forecast_results.items():
+            result_df[key] = values
         
         # Add actual data if available
         if actual_df is not None:
             actual_col = f'Actual_{forecast_year}'
+            actual_df_renamed = actual_df.copy()
+            actual_df_renamed.columns = [actual_df_renamed.columns[0], actual_col]
+            
             result_df = result_df.merge(
-                actual_df.rename(columns={actual_df.columns[1]: actual_col}),
+                actual_df_renamed,
                 left_on='Month',
-                right_on=actual_df.columns[0],
+                right_on=actual_df_renamed.columns[0],
                 how='left'
-            ).drop(columns=[actual_df.columns[0]])
+            )
+            result_df = result_df.drop(columns=[actual_df_renamed.columns[0]])
         
         # Display results
         st.header("📊 Forecast Results")
