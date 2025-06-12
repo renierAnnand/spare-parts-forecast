@@ -231,26 +231,35 @@ def detect_optimal_transformation(data):
 
 def advanced_outlier_detection(data, method='isolation_forest'):
     """Advanced outlier detection and treatment"""
-    from sklearn.ensemble import IsolationForest
-    from sklearn.neighbors import LocalOutlierFactor
-    
-    sales = data['Sales'].values.reshape(-1, 1)
-    
-    if method == 'isolation_forest':
-        detector = IsolationForest(contamination=0.1, random_state=42)
-        outliers = detector.fit_predict(sales) == -1
-    elif method == 'lof':
-        detector = LocalOutlierFactor(contamination=0.1)
-        outliers = detector.fit_predict(sales) == -1
-    else:
-        # IQR method (fallback)
+    try:
+        from sklearn.ensemble import IsolationForest
+        from sklearn.neighbors import LocalOutlierFactor
+        
+        sales = data['Sales'].values.reshape(-1, 1)
+        
+        if method == 'isolation_forest':
+            detector = IsolationForest(contamination=0.1, random_state=42)
+            outliers = detector.fit_predict(sales) == -1
+        elif method == 'lof':
+            detector = LocalOutlierFactor(contamination=0.1)
+            outliers = detector.fit_predict(sales) == -1
+        else:
+            # IQR method (fallback)
+            Q1 = np.percentile(sales, 25)
+            Q3 = np.percentile(sales, 75)
+            IQR = Q3 - Q1
+            outliers = (sales < (Q1 - 1.5 * IQR)) | (sales > (Q3 + 1.5 * IQR))
+            outliers = outliers.flatten()
+        
+        return outliers
+    except ImportError:
+        # Fallback to IQR method if sklearn not available
+        sales = data['Sales'].values
         Q1 = np.percentile(sales, 25)
         Q3 = np.percentile(sales, 75)
         IQR = Q3 - Q1
         outliers = (sales < (Q1 - 1.5 * IQR)) | (sales > (Q3 + 1.5 * IQR))
-        outliers = outliers.flatten()
-    
-    return outliers
+        return outliers
 
 
 def create_advanced_features(data):
@@ -277,7 +286,7 @@ def run_advanced_ml_ensemble(data, forecast_periods=12, scaling_factor=1.0):
         
         # Select feature columns (exclude date and target)
         feature_cols = [col for col in enhanced_data.columns 
-                       if col not in ['Month', 'Sales', 'Sales_Original', 'log_transformed']]
+                       if col not in ['Month', 'Sales', 'Sales_Original', 'transform_applied']]
         
         # Prepare features and target
         X = enhanced_data[feature_cols].fillna(method='ffill').fillna(method='bfill')
@@ -569,7 +578,7 @@ def run_enhanced_fallback_forecast(data, forecast_periods=12, scaling_factor=1.0
     """Enhanced fallback with multiple sophisticated approaches"""
     try:
         # Method 1: Seasonal naive with exponential smoothing
-        if len(data) >= 24:
+        if len(data) >= 24 and STATSMODELS_AVAILABLE:
             # Decompose the series
             decomposition = seasonal_decompose(data['Sales'], model='additive', period=12)
             
@@ -654,7 +663,6 @@ def create_confidence_intervals(forecasts_dict, confidence_level=0.95):
     return lower_bound, upper_bound
 
 
-# Load existing functions with enhancements
 @st.cache_data
 def load_data(uploaded_file):
     """Enhanced data loading with automatic preprocessing"""
@@ -704,7 +712,7 @@ def enhanced_preprocess_data(df):
     # 1. Advanced outlier detection
     outliers = advanced_outlier_detection(df)
     if outliers.sum() > 0:
-        st.info(f"📊 Detected and treated {outliers.sum()} outliers using Isolation Forest")
+        st.info(f"📊 Detected and treated {outliers.sum()} outliers using advanced detection")
         # Cap outliers instead of removing
         Q1, Q3 = df['Sales'].quantile([0.25, 0.75])
         IQR = Q3 - Q1
@@ -731,7 +739,289 @@ def enhanced_preprocess_data(df):
     return df
 
 
-# Enhanced main function with all improvements
+@st.cache_data
+def load_actual_data_enhanced(uploaded_file, forecast_year):
+    """
+    Enhanced actual data loading with better format detection and debugging
+    """
+    try:
+        # Read the file
+        df = pd.read_excel(uploaded_file)
+        
+        st.write("🔍 **Debugging Actual Data File:**")
+        st.write(f"📁 File shape: {df.shape}")
+        st.write("📋 Column names:", list(df.columns))
+        st.write("📊 First 5 rows:")
+        st.dataframe(df.head())
+        
+        # Try to detect the format
+        has_month_col = any(col.lower().strip() in ['month', 'date', 'time', 'period'] for col in df.columns)
+        has_sales_col = any(col.lower().strip() in ['sales', 'revenue', 'amount', 'value', 'total'] for col in df.columns)
+        
+        if has_month_col and has_sales_col:
+            # Long format detected
+            st.info("📊 Detected: Long format (Month/Sales columns)")
+            
+            # Find the correct column names
+            month_col = None
+            sales_col = None
+            
+            for col in df.columns:
+                if col.lower().strip() in ['month', 'date', 'time', 'period']:
+                    month_col = col
+                if col.lower().strip() in ['sales', 'revenue', 'amount', 'value', 'total']:
+                    sales_col = col
+            
+            if month_col is None or sales_col is None:
+                st.error(f"❌ Could not identify month column ({month_col}) or sales column ({sales_col})")
+                return None
+            
+            # Rename columns to standard format
+            df = df.rename(columns={month_col: 'Month', sales_col: 'Sales'})
+            
+            # Parse dates
+            df["Month"] = pd.to_datetime(df["Month"], errors="coerce")
+            df["Sales"] = pd.to_numeric(df["Sales"], errors="coerce").fillna(0)
+            df["Sales"] = df["Sales"].abs()
+            
+            # Show parsed data info
+            st.write(f"📅 Date range found: {df['Month'].min()} to {df['Month'].max()}")
+            st.write(f"💰 Sales range: {df['Sales'].min():,.0f} to {df['Sales'].max():,.0f}")
+            
+            # Filter to forecast year
+            start_date = pd.Timestamp(f"{forecast_year}-01-01")
+            end_date = pd.Timestamp(f"{forecast_year+1}-01-01")
+            
+            year_data = df[(df["Month"] >= start_date) & (df["Month"] < end_date)]
+            st.write(f"📆 Rows matching {forecast_year}: {len(year_data)}")
+            
+            if len(year_data) == 0:
+                available_years = df['Month'].dt.year.dropna().unique()
+                st.warning(f"⚠️ No data found for {forecast_year}. Available years: {sorted(available_years)}")
+                return None
+            
+            # Aggregate by month and filter out zeros
+            monthly_data = year_data.groupby("Month", as_index=False)["Sales"].sum()
+            monthly_data = monthly_data[monthly_data["Sales"] > 0]
+            monthly_data = monthly_data.sort_values("Month").reset_index(drop=True)
+            
+            st.success(f"✅ Successfully processed {len(monthly_data)} months of actual data")
+            st.write("📊 Processed monthly data:")
+            display_data = monthly_data.copy()
+            display_data['Month'] = display_data['Month'].dt.strftime('%Y-%m')
+            st.dataframe(display_data)
+            
+            return monthly_data.rename(columns={"Sales": f"Actual_{forecast_year}"})
+            
+        else:
+            # Wide format detected
+            st.info("📊 Detected: Wide format (month columns)")
+            
+            # Look for month patterns
+            month_patterns = []
+            for month_name in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
+                              'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']:
+                for pattern in [f"{month_name}-{forecast_year}", f"{month_name}_{forecast_year}", 
+                               f"{month_name} {forecast_year}", f"{month_name}{forecast_year}"]:
+                    if pattern in df.columns:
+                        month_patterns.append(pattern)
+            
+            if not month_patterns:
+                # Try different year formats
+                for col in df.columns:
+                    if str(forecast_year) in str(col) and any(month in str(col) for month in 
+                        ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']):
+                        month_patterns.append(col)
+            
+            st.write(f"📅 Found month columns: {month_patterns}")
+            
+            if not month_patterns:
+                st.error(f"❌ No month columns found for {forecast_year}")
+                st.write("💡 Expected format: 'Jan-2024', 'Feb-2024', etc.")
+                return None
+            
+            # Convert wide to long format
+            melted_data = []
+            
+            # Skip header rows that might contain metadata
+            data_rows = df[~df.iloc[:, 0].astype(str).str.contains("Item|Code|Product|SKU|Description", case=False, na=False)]
+            
+            for _, row in data_rows.iterrows():
+                for month_col in month_patterns:
+                    if month_col in row and pd.notna(row[month_col]):
+                        sales_value = pd.to_numeric(row[month_col], errors="coerce")
+                        if pd.notna(sales_value) and sales_value > 0:
+                            # Parse month from column name
+                            try:
+                                month_part = month_col.split('-')[0].split('_')[0].split(' ')[0]
+                                month_date = pd.to_datetime(f"{month_part}-01-{forecast_year}", format="%b-%d-%Y")
+                                melted_data.append({
+                                    "Month": month_date,
+                                    "Sales": abs(sales_value)
+                                })
+                            except Exception as e:
+                                st.warning(f"⚠️ Could not parse date from column: {month_col}")
+                                continue
+            
+            if not melted_data:
+                st.error("❌ No valid sales data found in wide format")
+                return None
+            
+            long_df = pd.DataFrame(melted_data)
+            
+            # Aggregate by month
+            monthly_data = long_df.groupby("Month", as_index=False)["Sales"].sum()
+            monthly_data = monthly_data.sort_values("Month").reset_index(drop=True)
+            
+            processed_months = monthly_data['Month'].dt.strftime('%b').tolist()
+            st.success(f"✅ Successfully processed data for: {', '.join(processed_months)}")
+            
+            st.write("📊 Processed monthly data:")
+            display_data = monthly_data.copy()
+            display_data['Month'] = display_data['Month'].dt.strftime('%Y-%m')
+            st.dataframe(display_data)
+            
+            return monthly_data.rename(columns={"Sales": f"Actual_{forecast_year}"})
+            
+    except Exception as e:
+        st.error(f"❌ Error loading actual data: {str(e)}")
+        st.write("📋 **Troubleshooting Steps:**")
+        st.write("1. Ensure file is a valid Excel file (.xlsx or .xls)")
+        st.write("2. Check that data contains recognizable month and sales columns")
+        st.write("3. Verify data is for the correct year")
+        st.write("4. Ensure sales values are positive numbers")
+        return None
+
+
+def create_comparison_chart_with_debug(result_df, forecast_year):
+    """
+    Enhanced comparison chart with debugging information
+    """
+    actual_col = f'Actual_{forecast_year}'
+    
+    st.write(f"🔍 **Chart Debug Info:**")
+    st.write(f"📊 Result dataframe shape: {result_df.shape}")
+    st.write(f"📋 Columns: {list(result_df.columns)}")
+    
+    if actual_col in result_df.columns:
+        actual_data_count = result_df[actual_col].notna().sum()
+        st.write(f"📈 Months with actual data: {actual_data_count}")
+        
+        if actual_data_count > 0:
+            available_data = result_df[result_df[actual_col].notna()].copy()
+            st.write("📅 Available actual data months:")
+            debug_actual = available_data[['Month', actual_col]].copy()
+            debug_actual['Month'] = debug_actual['Month'].dt.strftime('%Y-%m')
+            st.dataframe(debug_actual)
+        else:
+            st.warning("⚠️ No actual data found for comparison")
+            return None
+    else:
+        st.warning(f"⚠️ Column '{actual_col}' not found in results")
+        return None
+    
+    # Create the comparison chart
+    available_data = result_df[result_df[actual_col].notna()].copy()
+    
+    if len(available_data) == 0:
+        return None
+    
+    forecast_cols = [col for col in result_df.columns 
+                    if '_Forecast' in col or col in ['Intelligent_Ensemble', 'Weighted_Ensemble', 'Meta_Learning']]
+    
+    fig = go.Figure()
+    
+    # Add actual data
+    fig.add_trace(go.Scatter(
+        x=available_data['Month'],
+        y=available_data[actual_col],
+        mode='lines+markers',
+        name='🎯 ACTUAL',
+        line=dict(color='#FF6B6B', width=4),
+        marker=dict(size=12, symbol='circle')
+    ))
+    
+    # Add forecast data
+    colors = ['#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#FF9F43', '#6C5CE7']
+    for i, col in enumerate(forecast_cols):
+        if col in ['Intelligent_Ensemble', 'Weighted_Ensemble', 'Meta_Learning']:
+            line_style = dict(color='#6C5CE7', width=3, dash='dash')
+            icon = '🔥'
+        else:
+            line_style = dict(color=colors[i % len(colors)], width=2)
+            icon = '📈'
+        
+        model_name = col.replace('_Forecast', '').replace('_', ' ').upper()
+        fig.add_trace(go.Scatter(
+            x=available_data['Month'],
+            y=available_data[col],
+            mode='lines+markers',
+            name=f'{icon} {model_name}',
+            line=line_style,
+            marker=dict(size=6)
+        ))
+    
+    month_names = available_data['Month'].dt.strftime('%b').tolist()
+    months_text = ', '.join(month_names)
+    
+    fig.update_layout(
+        title=f'🎯 ENHANCED ACCURACY MODELS vs ACTUAL PERFORMANCE<br><sub>Comparison for available months: {months_text}</sub>',
+        xaxis_title='Month',
+        yaxis_title='Sales Volume',
+        height=700,
+        hovermode='x unified',
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5)
+    )
+    
+    return fig
+
+
+def detect_and_apply_scaling(historical_data, actual_data=None):
+    """Detect and apply scaling between historical and actual data"""
+    hist_avg = historical_data['Sales'].mean()
+    
+    if actual_data is not None and len(actual_data) > 0:
+        actual_avg = actual_data.iloc[:, 1].mean()
+        ratio = actual_avg / hist_avg if hist_avg > 0 else 1
+        
+        if ratio > 2 or ratio < 0.5:
+            st.warning(f"📊 Scale mismatch detected! Scaling factor: {ratio:.2f}")
+            return ratio
+    
+    return 1.0
+
+
+def calculate_accuracy_metrics(actual, forecast):
+    """Enhanced accuracy metrics"""
+    if len(actual) == 0 or len(forecast) == 0:
+        return None
+    
+    mask = ~(pd.isna(actual) | pd.isna(forecast))
+    actual_clean = actual[mask]
+    forecast_clean = forecast[mask]
+    
+    if len(actual_clean) == 0:
+        return None
+    
+    # Standard metrics
+    mape = np.mean(np.abs((actual_clean - forecast_clean) / actual_clean)) * 100
+    mae = mean_absolute_error(actual_clean, forecast_clean)
+    rmse = np.sqrt(mean_squared_error(actual_clean, forecast_clean))
+    
+    # Additional metrics
+    smape = np.mean(2 * np.abs(forecast_clean - actual_clean) / (np.abs(actual_clean) + np.abs(forecast_clean))) * 100
+    mase = mae / np.mean(np.abs(np.diff(actual_clean))) if len(actual_clean) > 1 else mae
+    
+    return {
+        "MAPE": mape,
+        "MAE": mae,
+        "RMSE": rmse,
+        "SMAPE": smape,
+        "MASE": mase
+    }
+
+
 def main():
     """Enhanced main function with advanced accuracy features"""
     st.title("🎯 Enhanced Accuracy Sales Forecasting Dashboard")
@@ -801,7 +1091,7 @@ def main():
     scaling_factor = 1.0
     
     if actual_2024_file is not None:
-        actual_2024_df = load_actual_2024_data(actual_2024_file, forecast_year)
+        actual_2024_df = load_actual_data_enhanced(actual_2024_file, forecast_year)
         if actual_2024_df is not None:
             scaling_factor = detect_and_apply_scaling(hist_df, actual_2024_df)
 
@@ -837,7 +1127,7 @@ def main():
         
         with col1:
             # Seasonality strength
-            if len(hist_df) >= 24:
+            if len(hist_df) >= 24 and STATSMODELS_AVAILABLE:
                 try:
                     monthly_data = hist_df.groupby('Month')['Sales'].sum().reset_index()
                     decomposition = seasonal_decompose(monthly_data['Sales'], model='additive', period=12)
@@ -864,10 +1154,13 @@ def main():
         with col3:
             # Data stationarity
             try:
-                adf_result = adfuller(hist_df['Sales'].dropna())
-                is_stationary = adf_result[1] < 0.05
-                stationarity_text = "✅ Stationary" if is_stationary else "❌ Non-stationary"
-                st.metric("📈 Stationarity", stationarity_text)
+                if STATSMODELS_AVAILABLE:
+                    adf_result = adfuller(hist_df['Sales'].dropna())
+                    is_stationary = adf_result[1] < 0.05
+                    stationarity_text = "✅ Stationary" if is_stationary else "❌ Non-stationary"
+                    st.metric("📈 Stationarity", stationarity_text)
+                else:
+                    st.metric("📈 Stationarity", "Analysis unavailable")
             except:
                 st.metric("📈 Stationarity", "Analysis failed")
         
@@ -1143,9 +1436,14 @@ def main():
         
         st.plotly_chart(fig, use_container_width=True)
         
-        # Performance analysis
+        # Performance analysis with enhanced debugging
         if actual_col in result_df.columns and result_df[actual_col].notna().any():
             st.subheader("🎯 Enhanced Performance Analysis")
+            
+            # Create debug chart
+            debug_fig = create_comparison_chart_with_debug(result_df, forecast_year)
+            if debug_fig:
+                st.plotly_chart(debug_fig, use_container_width=True)
             
             actual_data = result_df[result_df[actual_col].notna()]
             performance_data = []
@@ -1158,32 +1456,29 @@ def main():
                 forecast_values = actual_data[col].values
                 
                 try:
-                    mape = np.mean(np.abs((actual_values - forecast_values) / actual_values)) * 100
-                    mae = mean_absolute_error(actual_values, forecast_values)
-                    rmse = np.sqrt(mean_squared_error(actual_values, forecast_values))
-                    smape = np.mean(2 * np.abs(forecast_values - actual_values) / 
-                                   (np.abs(actual_values) + np.abs(forecast_values))) * 100
-                    
-                    # Enhanced metrics
-                    bias = np.mean(forecast_values - actual_values)
-                    bias_pct = (bias / np.mean(actual_values)) * 100
-                    
-                    cv_score = validation_scores.get(model_name.replace(' ', '_'), 'N/A')
-                    cv_text = f"{cv_score:.2f}" if cv_score != np.inf and cv_score != 'N/A' else 'N/A'
-                    
-                    performance_data.append({
-                        'Model': model_name,
-                        'MAPE (%)': f"{mape:.1f}%",
-                        'SMAPE (%)': f"{smape:.1f}%",
-                        'MAE': f"{mae:,.0f}",
-                        'RMSE': f"{rmse:,.0f}",
-                        'Bias': f"{bias:,.0f}",
-                        'Bias (%)': f"{bias_pct:+.1f}%",
-                        'CV Score': cv_text,
-                        'Accuracy': f"{100 - mape:.1f}%"
-                    })
-                    
+                    metrics = calculate_accuracy_metrics(actual_values, forecast_values)
+                    if metrics:
+                        # Enhanced metrics
+                        bias = np.mean(forecast_values - actual_values)
+                        bias_pct = (bias / np.mean(actual_values)) * 100
+                        
+                        cv_score = validation_scores.get(model_name.replace(' ', '_'), 'N/A')
+                        cv_text = f"{cv_score:.2f}" if cv_score != np.inf and cv_score != 'N/A' else 'N/A'
+                        
+                        performance_data.append({
+                            'Model': model_name,
+                            'MAPE (%)': f"{metrics['MAPE']:.1f}%",
+                            'SMAPE (%)': f"{metrics['SMAPE']:.1f}%",
+                            'MAE': f"{metrics['MAE']:,.0f}",
+                            'RMSE': f"{metrics['RMSE']:,.0f}",
+                            'Bias': f"{bias:,.0f}",
+                            'Bias (%)': f"{bias_pct:+.1f}%",
+                            'CV Score': cv_text,
+                            'Accuracy': f"{100 - metrics['MAPE']:.1f}%"
+                        })
+                        
                 except Exception as e:
+                    st.warning(f"⚠️ Could not calculate metrics for {model_name}: {str(e)}")
                     continue
             
             if performance_data:
@@ -1191,9 +1486,12 @@ def main():
                 st.dataframe(perf_df, use_container_width=True)
                 
                 # Highlight best model
-                best_idx = perf_df['MAPE (%)'].str.replace('%', '').astype(float).idxmin()
-                best_model = perf_df.iloc[best_idx]
-                st.success(f"🏆 Best Model: **{best_model['Model']}** with {best_model['MAPE (%)']} MAPE")
+                try:
+                    best_idx = perf_df['MAPE (%)'].str.replace('%', '').astype(float).idxmin()
+                    best_model = perf_df.iloc[best_idx]
+                    st.success(f"🏆 Best Model: **{best_model['Model']}** with {best_model['MAPE (%)']} MAPE")
+                except:
+                    st.info("📊 Performance analysis completed")
         
         # Enhanced export
         st.subheader("📊 Enhanced Analytics Export")
@@ -1294,48 +1592,6 @@ def main():
                 st.metric("📊 Confidence Intervals", "✅ Available")
             else:
                 st.metric("📊 Confidence Intervals", "Not Available")
-
-
-@st.cache_data
-def load_actual_2024_data(uploaded_file, forecast_year):
-    """Load actual data for validation"""
-    try:
-        df = pd.read_excel(uploaded_file)
-        
-        if "Month" in df.columns and "Sales" in df.columns:
-            df["Month"] = pd.to_datetime(df["Month"], errors="coerce")
-            df["Sales"] = pd.to_numeric(df["Sales"], errors="coerce").fillna(0)
-            df["Sales"] = df["Sales"].abs()
-            
-            start = pd.Timestamp(f"{forecast_year}-01-01")
-            end = pd.Timestamp(f"{forecast_year+1}-01-01")
-            df = df[(df["Month"] >= start) & (df["Month"] < end)]
-            
-            if df.empty:
-                return None
-            
-            monthly = df.groupby("Month", as_index=False)["Sales"].sum()
-            monthly = monthly[monthly["Sales"] > 0]
-            monthly = monthly.sort_values("Month").reset_index(drop=True)
-            
-            return monthly.rename(columns={"Sales": f"Actual_{forecast_year}"})
-    except Exception:
-        return None
-
-
-def detect_and_apply_scaling(historical_data, actual_data=None):
-    """Detect and apply scaling between historical and actual data"""
-    hist_avg = historical_data['Sales'].mean()
-    
-    if actual_data is not None and len(actual_data) > 0:
-        actual_avg = actual_data.iloc[:, 1].mean()
-        ratio = actual_avg / hist_avg if hist_avg > 0 else 1
-        
-        if ratio > 2 or ratio < 0.5:
-            st.warning(f"📊 Scale mismatch detected! Scaling factor: {ratio:.2f}")
-            return ratio
-    
-    return 1.0
 
 
 if __name__ == "__main__":
