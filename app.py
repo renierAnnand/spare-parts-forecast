@@ -973,10 +973,8 @@ def main():
         use_ensemble = st.checkbox("Ensemble Models", value=True)
     
     # Validate model selection
-    selected_models = sum([
-        use_sarima, use_ets, use_theta, use_croston, 
-        use_prophet, use_xgboost, use_lstm
-    ])
+    model_list = [use_sarima, use_ets, use_theta, use_croston, use_prophet, use_xgboost, use_lstm]
+    selected_models = sum(model_list)
     
     if selected_models == 0:
         st.sidebar.error("❌ Please select at least one model!")
