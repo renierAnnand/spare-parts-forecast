@@ -901,7 +901,7 @@ def main():
         enable_preprocessing = st.checkbox("Advanced Data Preprocessing", value=True,
                                          help="Apply outlier detection, transformations, and data cleaning")
         
-        # Unit scaling options - More prominent and easier to use
+        # Unit scaling options
         st.subheader("🚨 SCALE FIX (Use if forecasts are too high/low)")
         
         # Quick fix buttons
@@ -926,7 +926,7 @@ def main():
                 help="Enter 0.001 to divide by 1000, or 0.000001 to divide by 1M"
             )
         
-        # Advanced manual scaling (keep existing)
+        # Advanced manual scaling
         manual_scaling = st.selectbox(
             "Advanced Scaling Presets",
             options=["None", "Historical in Thousands", "Historical in Millions", 
@@ -1023,29 +1023,26 @@ def main():
     if hist_df is None:
         return
     
-    # Load actual data if provided - with scaling logic
+    # Load actual data if provided
     actual_df = None
-    final_scaling_factor = scaling_override  # Use the scaling override directly
+    final_scaling_factor = scaling_override
     
     if actual_file is not None:
         actual_content = actual_file.read()
         actual_df = load_actual_2024_data(io.BytesIO(actual_content), forecast_year)
         
         if actual_df is not None:
-            # Show the detected scaling issue but don't override manual setting
             auto_scaling = detect_and_apply_scaling(hist_df, actual_df)
             
-            # If user hasn't set manual scaling (still at default 1.0), use auto-detected
             if scaling_override == 1.0:
                 final_scaling_factor = auto_scaling
             else:
-                # User has set manual scaling - use that instead
                 final_scaling_factor = scaling_override
             
             st.info(f"📊 **Final Scaling Factor**: {final_scaling_factor:.6f}")
             
             if final_scaling_factor < 0.01:
-                st.success("✅ **Small Scaling Factor** - This will significantly REDUCE forecast values (divide by large number)")
+                st.success("✅ **Small Scaling Factor** - This will significantly REDUCE forecast values")
             elif final_scaling_factor > 100:
                 st.warning("⚠️ **Large Scaling Factor** - This will significantly INCREASE forecast values")
     else:
@@ -1062,7 +1059,6 @@ def main():
     
     # Additional data validation
     if hist_df is not None:
-        # Check for reasonable data ranges
         hist_mean = hist_df['Sales_Original'].mean()
         hist_std = hist_df['Sales_Original'].std()
         cv = hist_std / hist_mean if hist_mean > 0 else 0
@@ -1071,7 +1067,6 @@ def main():
             st.warning("⚠️ **High Variability Detected**: Your data has high volatility (CV > 200%)")
             st.info("💡 Consider using ensemble methods or robust forecasting techniques")
         
-        # Check for trend
         if len(hist_df) >= 12:
             recent_avg = hist_df['Sales_Original'].tail(6).mean()
             older_avg = hist_df['Sales_Original'].head(6).mean()
@@ -1152,7 +1147,6 @@ def main():
                 forecast_results[f"{model_name}_Forecast"] = forecast_values
                 validation_scores[model_name] = score
                 
-                # Show model-specific info with scale validation
                 forecast_avg = np.mean(forecast_values)
                 forecast_range = f"{np.min(forecast_values):,.0f} - {np.max(forecast_values):,.0f}"
                 
@@ -1174,14 +1168,12 @@ def main():
             status_text.text("Creating ensemble forecasts...")
             
             try:
-                # Weighted ensemble
                 weights = calculate_ensemble_weights(validation_scores, method=ensemble_method)
                 weighted_forecast = create_weighted_ensemble(forecast_results, weights)
                 forecast_results["Weighted_Ensemble"] = weighted_forecast
                 
                 progress_bar.progress((len(models_to_run) + 1) / total_steps)
                 
-                # Meta-learning ensemble
                 if enable_meta_learning and actual_df is not None:
                     meta_forecast = create_meta_learning_ensemble(
                         forecast_results, hist_df, actual_df, final_scaling_factor
@@ -1234,7 +1226,6 @@ def main():
             if len(actual_values) > 0:
                 actual_mean = actual_values.mean()
                 
-                # Check if any forecast is way off
                 forecast_cols = []
                 for col in result_df.columns:
                     if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']:
@@ -1243,24 +1234,21 @@ def main():
                 way_off_models = []
                 for col in forecast_cols:
                     forecast_mean = result_df[col].mean()
-                    if forecast_mean > actual_mean * 3:  # More than 3x actual
+                    if forecast_mean > actual_mean * 3:
                         way_off_models.append((col, forecast_mean / actual_mean))
                 
                 if way_off_models:
                     st.error("🚨 **Scale Issue Still Detected!**")
                     st.error(f"   Actual data average: {actual_mean:,.0f}")
                     
-                    # Show top 3 problematic models
                     for model, ratio in way_off_models[:3]:
                         model_name = model.replace('_Forecast', '')
                         forecast_avg = result_df[model].mean()
                         st.error(f"   {model_name} average: {forecast_avg:,.0f} ({ratio:.1f}x too high)")
                     
-                    # Emergency fix button
                     col1, col2, col3 = st.columns([1, 2, 1])
                     with col2:
                         if st.button("🔧 **EMERGENCY SCALE FIX**", type="primary", use_container_width=True):
-                            # Apply aggressive scaling to all forecasts
                             first_forecast_col = forecast_cols[0]
                             correction_ratio = actual_mean / result_df[first_forecast_col].mean()
                             
@@ -1300,7 +1288,6 @@ def main():
         if actual_col in result_df.columns and result_df[actual_col].notna().any():
             st.subheader("🎯 Model Performance Analysis")
             
-            # Create performance summary with error handling
             performance_data = []
             
             model_cols = []
@@ -1312,13 +1299,11 @@ def main():
                 try:
                     model_name = col.replace('_Forecast', '').replace('_', ' ')
                     
-                    # Get subset with actual data available
                     actual_subset = result_df[result_df[actual_col].notna()].copy()
                     
                     if len(actual_subset) == 0:
                         continue
                     
-                    # Calculate metrics with error handling
                     metrics = calculate_comprehensive_metrics(
                         actual_subset[actual_col],
                         actual_subset[col]
@@ -1341,21 +1326,18 @@ def main():
             if performance_data:
                 perf_df = pd.DataFrame(performance_data)
                 
-                # Sort by MAPE (convert to numeric for sorting)
                 try:
                     perf_df['MAPE_numeric'] = perf_df['MAPE (%)'].str.replace('%', '').astype(float)
                     perf_df = perf_df.sort_values('MAPE_numeric').drop('MAPE_numeric', axis=1)
                 except:
-                    pass  # Keep original order if sorting fails
+                    pass
                 
-                # Display performance table
                 st.dataframe(
                     perf_df,
                     use_container_width=True,
                     hide_index=True
                 )
                 
-                # Show best model if available
                 if len(perf_df) > 0:
                     best_model = perf_df.iloc[0]['Model']
                     best_mape = perf_df.iloc[0]['MAPE (%)']
@@ -1368,13 +1350,9 @@ def main():
         # Detailed results table
         st.subheader("📋 Detailed Forecast Results")
         
-        # Format the results for display
         display_df = result_df.copy()
-        
-        # Format month column
         display_df['Month'] = display_df['Month'].dt.strftime('%Y-%m')
         
-        # Round numeric columns
         numeric_cols = display_df.select_dtypes(include=[np.number]).columns
         display_df[numeric_cols] = display_df[numeric_cols].round(0)
         
@@ -1386,7 +1364,6 @@ def main():
         col1, col2 = st.columns(2)
         
         with col1:
-            # CSV download
             csv_data = result_df.to_csv(index=False)
             st.download_button(
                 label="📥 Download CSV",
@@ -1396,7 +1373,6 @@ def main():
             )
         
         with col2:
-            # Excel download
             excel_buffer = io.BytesIO()
             with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
                 result_df.to_excel(writer, sheet_name='Forecasts', index=False)
@@ -1409,7 +1385,20 @@ def main():
                 data=excel_data,
                 file_name=f"forecast_results_{forecast_year}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            )df)
+            
+            # If user hasn't set manual scaling (still at default 1.0), use auto-detected
+            if scaling_override == 1.0:
+                final_scaling_factor = auto_scaling
+            else:
+                # User has set manual scaling - use that instead
+                final_scaling_factor = scaling_override
+            
+            st.info(f"📊 **Final Scaling Factor**: {final_scaling_factor:.6f}")
+
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     main()0]
