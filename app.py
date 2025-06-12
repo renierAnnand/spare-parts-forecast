@@ -973,8 +973,10 @@ def main():
         use_ensemble = st.checkbox("Ensemble Models", value=True)
     
     # Validate model selection
-    selected_models = sum([use_sarima, use_ets, use_theta, use_croston, 
-                          use_prophet, use_xgboost, use_lstm])
+    selected_models = sum([
+        use_sarima, use_ets, use_theta, use_croston, 
+        use_prophet, use_xgboost, use_lstm
+    ])
     
     if selected_models == 0:
         st.sidebar.error("❌ Please select at least one model!")
@@ -1227,8 +1229,8 @@ def main():
                 actual_mean = actual_values.mean()
                 
                 # Check if any forecast is way off
-                forecast_cols = [col for col in result_df.columns if '_Forecast' in col or 
-                               col in ['Weighted_Ensemble', 'Meta_Learning']]
+                forecast_cols = [col for col in result_df.columns 
+                               if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']]
                 
                 way_off_models = []
                 for col in forecast_cols:
@@ -1287,8 +1289,8 @@ def main():
             # Create performance summary with error handling
             performance_data = []
             
-            model_cols = [c for c in result_df.columns if '_Forecast' in c or 
-                         c in ['Weighted_Ensemble', 'Meta_Learning']]
+            model_cols = [c for c in result_df.columns 
+                         if '_Forecast' in c or c in ['Weighted_Ensemble', 'Meta_Learning']]
             
             for col in model_cols:
                 try:
@@ -1382,7 +1384,7 @@ def main():
             excel_buffer = io.BytesIO()
             with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
                 result_df.to_excel(writer, sheet_name='Forecasts', index=False)
-                if 'performance_data' in locals():
+                if 'performance_data' in locals() and performance_data:
                     pd.DataFrame(performance_data).to_excel(writer, sheet_name='Performance', index=False)
             excel_data = excel_buffer.getvalue()
             
