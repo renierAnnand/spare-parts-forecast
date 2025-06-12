@@ -807,8 +807,10 @@ def create_forecast_plot(result_df, forecast_year, historical_data):
         )
         
         # Forecast models
-        forecast_cols = [col for col in result_df.columns 
-                        if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']]
+        forecast_cols = []
+        for col in result_df.columns:
+            if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']:
+                forecast_cols.append(col)
         
         colors = ['red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'cyan']
         
@@ -1233,8 +1235,10 @@ def main():
                 actual_mean = actual_values.mean()
                 
                 # Check if any forecast is way off
-                forecast_cols = [col for col in result_df.columns 
-                               if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']]
+                forecast_cols = []
+                for col in result_df.columns:
+                    if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']:
+                        forecast_cols.append(col)
                 
                 way_off_models = []
                 for col in forecast_cols:
@@ -1299,8 +1303,10 @@ def main():
             # Create performance summary with error handling
             performance_data = []
             
-            model_cols = [c for c in result_df.columns 
-                         if '_Forecast' in c or c in ['Weighted_Ensemble', 'Meta_Learning']]
+            model_cols = []
+            for c in result_df.columns:
+                if '_Forecast' in c or c in ['Weighted_Ensemble', 'Meta_Learning']:
+                    model_cols.append(c)
             
             for col in model_cols:
                 try:
