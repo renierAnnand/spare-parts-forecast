@@ -1246,7 +1246,8 @@ def main():
                     st.error("🚨 **Scale Issue Still Detected!**")
                     st.error(f"   Actual data average: {actual_mean:,.0f}")
                     
-                    for model, ratio in way_off_models[:3]:  # Show top 3
+                    # Show top 3 problematic models
+                    for model, ratio in way_off_models[:3]:
                         model_name = model.replace('_Forecast', '')
                         forecast_avg = result_df[model].mean()
                         st.error(f"   {model_name} average: {forecast_avg:,.0f} ({ratio:.1f}x too high)")
@@ -1256,7 +1257,8 @@ def main():
                     with col2:
                         if st.button("🔧 **EMERGENCY SCALE FIX**", type="primary", use_container_width=True):
                             # Apply aggressive scaling to all forecasts
-                            correction_ratio = actual_mean / result_df[forecast_cols[0]].mean()
+                            first_forecast_col = forecast_cols[0]
+                            correction_ratio = actual_mean / result_df[first_forecast_col].mean()
                             
                             for col in forecast_cols:
                                 result_df[col] = result_df[col] * correction_ratio
@@ -1268,7 +1270,11 @@ def main():
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            total_forecast = result_df['Weighted_Ensemble'].sum() if 'Weighted_Ensemble' in result_df else list(forecast_results.values())[0].sum()
+            if 'Weighted_Ensemble' in result_df.columns:
+                total_forecast = result_df['Weighted_Ensemble'].sum()
+            else:
+                first_forecast = list(forecast_results.values())[0]
+                total_forecast = first_forecast.sum()
             st.metric("📈 Total Forecast", f"{total_forecast:,.0f}")
         
         with col2:
@@ -1276,8 +1282,8 @@ def main():
             st.metric("📅 Average Monthly", f"{avg_monthly:,.0f}")
         
         with col3:
-            yoy_growth = ((total_forecast - hist_df['Sales_Original'].tail(12).sum()) / 
-                         hist_df['Sales_Original'].tail(12).sum() * 100)
+            recent_total = hist_df['Sales_Original'].tail(12).sum()
+            yoy_growth = ((total_forecast - recent_total) / recent_total * 100)
             st.metric("📊 YoY Growth", f"{yoy_growth:+.1f}%")
         
         # Interactive forecast plot
