@@ -85,7 +85,7 @@ def load_data_optimized(file_content, file_hash):
     # Parse dates
     df["Month"] = pd.to_datetime(df["Month"], errors="coerce")
     if df["Month"].isna().any():
-        st.error("Some dates could not be parsed. Please check the 'Month' column format.")
+        st.error("Some dates could not be parsed. Please check the Month column format.")
         return None
 
     # Clean sales data
