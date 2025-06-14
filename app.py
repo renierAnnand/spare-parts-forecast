@@ -1211,13 +1211,13 @@ def main():
             # Seasonality insights
             if len(hist_df) >= 24:
                 st.success(f"""
-                **🔮 Forecast Summary:**
+                🔮 **Forecast Summary:**
                 Your data shows clear patterns, and our advanced AI models have generated reliable forecasts for the next 12 months. 
                 The ensemble model (recommended) predicts a total of **{ensemble_total:,.0f}** in sales over the next 12 months.
                 """)
             else:
                 st.warning(f"""
-                **🔮 Forecast Summary:**
+                🔮 **Forecast Summary:**
                 With {len(hist_df)} months of data, our models have generated forecasts for the next 12 months.
                 For best accuracy, consider gathering 24+ months of historical data. Current forecast total: **{ensemble_total:,.0f}**
                 """)
