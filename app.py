@@ -60,14 +60,35 @@ class MetaLearner(BaseEstimator, RegressorMixin):
 def load_data(uploaded_file):
     """
     Load and preprocess ALL historical sales data with advanced preprocessing.
+    Supports both standard long format and wide format (parts sales by month).
     Automatically determines the forecast period based on the latest date in data.
     """
     try:
         df = pd.read_excel(uploaded_file)
-    except Exception:
-        st.error("Could not read the uploaded file. Please ensure it's a valid Excel file.")
+    except Exception as e:
+        st.error(f"Could not read the uploaded file. Please ensure it's a valid Excel file. Error: {str(e)}")
         return None, None
 
+    # Check if this is the standard long format (Month, Sales columns)
+    if "Month" in df.columns and "Sales" in df.columns:
+        return load_standard_format(df)
+    
+    # Check if this is wide format (parts sales format)
+    elif len(df.columns) > 4 and df.columns[0] in ['Item Code', 'MonthYear', 'Item']:
+        return load_wide_format(df)
+    
+    else:
+        st.error("""
+        **Unsupported file format.** Please ensure your file is in one of these formats:
+        
+        **Format 1 (Standard):** Columns: Month, Sales
+        **Format 2 (Parts Sales):** Columns: Item Code, Item Description, Brand, Engine, Jan-2022, Feb-2022, etc.
+        """)
+        return None, None
+
+
+def load_standard_format(df):
+    """Load standard format with Month and Sales columns"""
     if "Month" not in df.columns or "Sales" not in df.columns:
         st.error("The file must contain 'Month' and 'Sales' columns.")
         return None, None
@@ -123,6 +144,115 @@ def load_data(uploaded_file):
         df_processed = preprocess_data(df)
     
     return df_processed[["Month", "Sales", "Sales_Original"]], forecast_info
+
+
+def load_wide_format(df):
+    """Load wide format with parts sales by month"""
+    try:
+        st.info("📊 Detected wide format (parts sales by month) - converting to time series...")
+        
+        # Identify month columns (skip the first few metadata columns)
+        month_columns = []
+        metadata_cols = 4  # Item Code, Item Description, Brand, Engine
+        
+        # Look for date-like column headers starting from column 4
+        for col in df.columns[metadata_cols:]:
+            if col and pd.notna(col):
+                # Try to parse as date
+                try:
+                    # Handle various date formats
+                    if isinstance(col, str):
+                        if '-' in col and len(col.split('-')) == 2:
+                            # Format like "Jan-2022"
+                            parsed_date = pd.to_datetime(col, format='%b-%Y', errors='coerce')
+                        elif '/' in col:
+                            # Format like "01/2022"
+                            parsed_date = pd.to_datetime(col, errors='coerce')
+                        else:
+                            parsed_date = pd.to_datetime(col, errors='coerce')
+                    else:
+                        parsed_date = pd.to_datetime(str(col), errors='coerce')
+                    
+                    if pd.notna(parsed_date):
+                        month_columns.append((col, parsed_date))
+                except:
+                    continue
+        
+        if not month_columns:
+            st.error("No valid month columns found. Please check your date format in column headers.")
+            return None, None
+        
+        # Sort month columns by date
+        month_columns.sort(key=lambda x: x[1])
+        st.success(f"📅 Found {len(month_columns)} month columns from {month_columns[0][1].strftime('%b %Y')} to {month_columns[-1][1].strftime('%b %Y')}")
+        
+        # Convert wide format to long format
+        long_data = []
+        
+        for _, row in df.iterrows():
+            # Skip header rows and rows with no item code
+            if pd.isna(row.iloc[0]) or str(row.iloc[0]).lower() in ['item code', 'monthyear', 'item']:
+                continue
+                
+            for month_col, month_date in month_columns:
+                if month_col in row.index and pd.notna(row[month_col]):
+                    sales_value = pd.to_numeric(row[month_col], errors='coerce')
+                    if pd.notna(sales_value) and sales_value > 0:
+                        long_data.append({
+                            'Month': month_date,
+                            'Sales': abs(sales_value),
+                            'Item_Code': str(row.iloc[0]),
+                            'Item_Description': str(row.iloc[1]) if len(row) > 1 else '',
+                            'Brand': str(row.iloc[2]) if len(row) > 2 else '',
+                            'Engine': str(row.iloc[3]) if len(row) > 3 else ''
+                        })
+        
+        if not long_data:
+            st.error("No valid sales data found in the file.")
+            return None, None
+        
+        # Create DataFrame from long data
+        long_df = pd.DataFrame(long_data)
+        
+        # Aggregate by month (sum all parts sales for each month)
+        monthly_df = long_df.groupby('Month', as_index=False).agg({
+            'Sales': 'sum'
+        }).sort_values('Month').reset_index(drop=True)
+        
+        # Get the latest date to determine forecast period
+        latest_date = monthly_df['Month'].max()
+        forecast_start_date = latest_date + pd.DateOffset(months=1)
+        
+        # Create forecast year info
+        forecast_info = {
+            'latest_date': latest_date,
+            'forecast_start': forecast_start_date,
+            'forecast_year': forecast_start_date.year,
+            'data_end_year': latest_date.year,
+            'data_end_month': latest_date.strftime('%Y-%m'),
+            'total_parts': long_df['Item_Code'].nunique(),
+            'total_records': len(long_data)
+        }
+        
+        st.success(f"""
+        ✅ **Successfully processed parts sales data:**
+        - **{long_df['Item_Code'].nunique():,} unique parts**
+        - **{len(long_data):,} individual sales records**
+        - **{len(monthly_df)} months** of aggregated data
+        - **Data range:** {monthly_df['Month'].min().strftime('%b %Y')} to {monthly_df['Month'].max().strftime('%b %Y')}
+        """)
+        
+        # Add original sales column for reference
+        monthly_df['Sales_Original'] = monthly_df['Sales'].copy()
+        
+        # Advanced preprocessing on the monthly aggregated data
+        df_processed = preprocess_data(monthly_df)
+        
+        return df_processed[["Month", "Sales", "Sales_Original"]], forecast_info
+        
+    except Exception as e:
+        st.error(f"Error processing wide format data: {str(e)}")
+        return None, None
 
 
 def preprocess_data(df):
@@ -647,16 +777,28 @@ def main():
         return
 
     # File upload
-    st.subheader("📁 Upload Your Complete Historical Data")
+    st.subheader("📁 Upload Your Sales Data")
     
     historical_file = st.file_uploader(
-        "📊 Upload ALL Historical Sales Data",
+        "📊 Upload Sales Data (Multiple Formats Supported)",
         type=["xlsx", "xls"],
-        help="Excel file with 'Month' and 'Sales' columns - the system will automatically predict the next 12 months from your latest data point"
+        help="""
+        **Supported formats:**
+        • **Standard Format:** Month, Sales columns
+        • **Parts Sales Format:** Item Code, Description, Brand, Engine, Jan-2022, Feb-2022, etc.
+        
+        The system will automatically detect your format and aggregate all sales by month.
+        """
     )
 
     if historical_file is None:
-        st.info("👆 Please upload your complete historical sales data to begin forecasting the next 12 months.")
+        st.info("""
+        👆 **Please upload your sales data to begin forecasting.**
+        
+        **Supported formats:**
+        - **Format 1:** Month, Sales (standard time series)
+        - **Format 2:** Parts sales with monthly columns (Jan-2022, Feb-2022, etc.)
+        """)
         return
 
     # Load and validate historical data
