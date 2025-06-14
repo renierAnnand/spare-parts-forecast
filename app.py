@@ -1253,4 +1253,14 @@ if __name__ == "__main__":
         else:
             st.metric("📊 Seasonality", "Need 24+ months")
         
-    with col2
+    with col2:
+        # Trend detection - use monthly aggregated data
+        if len(monthly_data) >= 12:
+            try:
+                recent_trend = np.polyfit(range(len(monthly_data['Sales'].tail(12))), monthly_data['Sales'].tail(12), 1)[0]
+                trend_direction = "📈 Increasing" if recent_trend > 0 else "📉 Decreasing" 
+                st.metric("📈 Recent Trend", trend_direction)
+            except:
+                st.metric("📈 Recent Trend", "Analysis unavailable")
+        else:
+            st.metric("📈 Recent Trend", "Need 12+ months")
