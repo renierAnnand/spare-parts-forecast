@@ -6,7 +6,7 @@ st.set_page_config(page_title="Advanced Sales Forecasting Dashboard", layout="wi
 import pandas as pd
 import numpy as np
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
@@ -59,24 +59,24 @@ class MetaLearner(BaseEstimator, RegressorMixin):
 @st.cache_data
 def load_data(uploaded_file):
     """
-    Load and preprocess the historical sales data with advanced preprocessing.
-    Properly aggregates multiple entries per month.
+    Load and preprocess ALL historical sales data with advanced preprocessing.
+    Automatically determines the forecast period based on the latest date in data.
     """
     try:
         df = pd.read_excel(uploaded_file)
     except Exception:
         st.error("Could not read the uploaded file. Please ensure it's a valid Excel file.")
-        return None
+        return None, None
 
     if "Month" not in df.columns or "Sales" not in df.columns:
         st.error("The file must contain 'Month' and 'Sales' columns.")
-        return None
+        return None, None
 
     # Parse dates
     df["Month"] = pd.to_datetime(df["Month"], errors="coerce")
     if df["Month"].isna().any():
         st.error("Some dates could not be parsed. Please check the 'Month' column format.")
-        return None
+        return None, None
 
     # Clean sales data
     df["Sales"] = pd.to_numeric(df["Sales"], errors="coerce").fillna(0)
@@ -84,6 +84,19 @@ def load_data(uploaded_file):
 
     # Sort by date
     df = df.sort_values("Month").reset_index(drop=True)
+    
+    # Get the latest date to determine forecast period
+    latest_date = df['Month'].max()
+    forecast_start_date = latest_date + pd.DateOffset(months=1)
+    
+    # Create forecast year info
+    forecast_info = {
+        'latest_date': latest_date,
+        'forecast_start': forecast_start_date,
+        'forecast_year': forecast_start_date.year,
+        'data_end_year': latest_date.year,
+        'data_end_month': latest_date.strftime('%Y-%m')
+    }
     
     # Check if there are multiple entries per month
     original_rows = len(df)
@@ -103,13 +116,13 @@ def load_data(uploaded_file):
         # Advanced preprocessing on the monthly aggregated data
         df_processed = preprocess_data(df_monthly)
         
-        st.success(f"✅ Successfully aggregated to {len(df_processed)} monthly data points")
+        st.success(f"✅ Successfully processed {len(df_processed)} monthly data points")
         
     else:
         # Data is already monthly, just preprocess
         df_processed = preprocess_data(df)
     
-    return df_processed[["Month", "Sales", "Sales_Original"]]
+    return df_processed[["Month", "Sales", "Sales_Original"]], forecast_info
 
 
 def preprocess_data(df):
@@ -148,102 +161,6 @@ def preprocess_data(df):
     return df
 
 
-@st.cache_data
-def load_actual_2024_data(uploaded_file, forecast_year):
-    """
-    Load actual data with preprocessing - only include months that have actual data
-    """
-    try:
-        df = pd.read_excel(uploaded_file)
-        
-        # Check if it's the standard long format
-        if "Month" in df.columns and "Sales" in df.columns:
-            df["Month"] = pd.to_datetime(df["Month"], errors="coerce")
-            if df["Month"].isna().any():
-                st.error("Some dates in the actual file could not be parsed.")
-                return None
-
-            df["Sales"] = pd.to_numeric(df["Sales"], errors="coerce").fillna(0)
-            df["Sales"] = df["Sales"].abs()
-
-            # Filter to the forecast year only
-            start = pd.Timestamp(f"{forecast_year}-01-01")
-            end = pd.Timestamp(f"{forecast_year+1}-01-01")
-            df = df[(df["Month"] >= start) & (df["Month"] < end)]
-            
-            if df.empty:
-                st.warning(f"No rows match year {forecast_year}.")
-                return None
-
-            # Only include months that have actual non-zero data
-            monthly = df.groupby("Month", as_index=False)["Sales"].sum()
-            monthly = monthly[monthly["Sales"] > 0]  # Only months with actual sales
-            monthly = monthly.sort_values("Month").reset_index(drop=True)
-            
-            return monthly.rename(columns={"Sales": f"Actual_{forecast_year}"})
-        
-        else:
-            # Wide format handling
-            st.info("📊 Detected wide format data - converting to long format...")
-            
-            month_patterns = [
-                f"Jan-{forecast_year}", f"Feb-{forecast_year}", f"Mar-{forecast_year}",
-                f"Apr-{forecast_year}", f"May-{forecast_year}", f"Jun-{forecast_year}",
-                f"Jul-{forecast_year}", f"Aug-{forecast_year}", f"Sep-{forecast_year}",
-                f"Oct-{forecast_year}", f"Nov-{forecast_year}", f"Dec-{forecast_year}"
-            ]
-            
-            # Only include month patterns that actually exist in the data
-            available_months = [pattern for pattern in month_patterns if pattern in df.columns]
-            
-            if not available_months:
-                st.error(f"No month columns found for {forecast_year}.")
-                return None
-            
-            st.info(f"📅 Found data for months: {', '.join([m.split('-')[0] for m in available_months])}")
-            
-            first_col = df.columns[0]
-            data_rows = df[~df[first_col].astype(str).str.contains("Item|Code|QTY", case=False, na=False)]
-            
-            melted_data = []
-            
-            for _, row in data_rows.iterrows():
-                for month_col in available_months:
-                    if month_col in row and pd.notna(row[month_col]):
-                        sales_value = pd.to_numeric(row[month_col], errors="coerce")
-                        if pd.notna(sales_value) and sales_value > 0:
-                            month_str = month_col.replace("-", "-01-")
-                            try:
-                                month_date = pd.to_datetime(month_str, format="%b-%d-%Y")
-                                melted_data.append({
-                                    "Month": month_date,
-                                    "Sales": abs(sales_value)
-                                })
-                            except:
-                                continue
-            
-            if not melted_data:
-                st.error("No valid sales data found.")
-                return None
-            
-            long_df = pd.DataFrame(melted_data)
-            
-            # Group by month and sum, but only for months that actually have data
-            monthly = long_df.groupby("Month", as_index=False)["Sales"].sum()
-            monthly = monthly[monthly["Sales"] > 0]  # Only months with actual sales data
-            monthly = monthly.sort_values("Month").reset_index(drop=True)
-            
-            # Show which months were actually processed
-            processed_months = monthly['Month'].dt.strftime('%b').tolist()
-            st.success(f"✅ Successfully processed data for: {', '.join(processed_months)}")
-            
-            return monthly.rename(columns={"Sales": f"Actual_{forecast_year}"})
-            
-    except Exception as e:
-        st.error(f"Error loading actual data: {str(e)}")
-        return None
-
-
 def calculate_accuracy_metrics(actual, forecast):
     """Enhanced accuracy metrics"""
     if len(actual) == 0 or len(forecast) == 0:
@@ -272,24 +189,6 @@ def calculate_accuracy_metrics(actual, forecast):
         "SMAPE": smape,
         "MASE": mase
     }
-
-
-def detect_and_apply_scaling(historical_data, actual_data=None):
-    """Enhanced scaling detection with multiple methods"""
-    hist_avg = historical_data['Sales'].mean()
-    
-    if actual_data is not None and len(actual_data) > 0:
-        actual_avg = actual_data.iloc[:, 1].mean()
-        
-        # Multiple scaling detection methods
-        ratio = actual_avg / hist_avg if hist_avg > 0 else 1
-        
-        # Apply scaling if ratio is significant
-        if ratio > 2 or ratio < 0.5:
-            st.warning(f"📊 Scale mismatch detected! Scaling factor: {ratio:.2f}")
-            return ratio
-    
-    return 1.0
 
 
 def optimize_sarima_parameters(data, max_p=2, max_d=2, max_q=2, seasonal_periods=12):
@@ -333,16 +232,16 @@ def optimize_sarima_parameters(data, max_p=2, max_d=2, max_q=2, seasonal_periods
     return best_params if best_params else {'order': (1, 1, 1), 'seasonal_order': (1, 1, 1, 12)}
 
 
-def run_advanced_sarima_forecast(data, forecast_periods=12, scaling_factor=1.0):
+def run_advanced_sarima_forecast(data, forecast_periods=12):
     """Fixed SARIMA with better error handling and validation"""
     try:
         if not STATSMODELS_AVAILABLE:
-            return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+            return run_fallback_forecast(data, forecast_periods), np.inf
         
         # Ensure we have enough data points
         if len(data) < 24:
             st.warning("⚠️ SARIMA needs at least 24 data points. Using fallback method.")
-            return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+            return run_fallback_forecast(data, forecast_periods), np.inf
         
         # Create a copy to avoid modifying original data
         work_data = data.copy()
@@ -402,12 +301,12 @@ def run_advanced_sarima_forecast(data, forecast_periods=12, scaling_factor=1.0):
         if np.any(np.isnan(forecast_values)) or np.any(np.isinf(forecast_values)):
             raise ValueError("Forecast contains NaN or infinite values")
         
-        # Reverse log transformation first if applied
+        # Reverse log transformation if applied
         if log_transformed:
             forecast_values = np.expm1(forecast_values)
         
         # Apply scaling and ensure positive values
-        forecast_values = np.maximum(forecast_values, 0) * scaling_factor
+        forecast_values = np.maximum(forecast_values, 0)
         
         # Final validation
         if len(forecast_values) != 12:
@@ -417,14 +316,14 @@ def run_advanced_sarima_forecast(data, forecast_periods=12, scaling_factor=1.0):
         
     except Exception as e:
         st.warning(f"⚠️ Advanced SARIMA failed: {str(e)}. Using fallback method.")
-        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+        return run_fallback_forecast(data, forecast_periods), np.inf
 
 
-def run_advanced_prophet_forecast(data, forecast_periods=12, scaling_factor=1.0):
+def run_advanced_prophet_forecast(data, forecast_periods=12):
     """Enhanced Prophet with better error handling"""
     try:
         if not PROPHET_AVAILABLE:
-            return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+            return run_fallback_forecast(data, forecast_periods), np.inf
         
         # Create a copy to avoid modifying original data
         work_data = data.copy()
@@ -461,25 +360,25 @@ def run_advanced_prophet_forecast(data, forecast_periods=12, scaling_factor=1.0)
         if len(forecast_values) != forecast_periods:
             raise ValueError(f"Expected {forecast_periods} forecast values, got {len(forecast_values)}")
         
-        # Reverse log transformation first if applied
+        # Reverse log transformation if applied
         if log_transformed:
             forecast_values = np.expm1(forecast_values)
         
         # Apply scaling and ensure positive values
-        forecast_values = np.maximum(forecast_values, 0) * scaling_factor
+        forecast_values = np.maximum(forecast_values, 0)
         
         return forecast_values, np.mean(np.abs(forecast['yhat'] - prophet_data['y']))
         
     except Exception as e:
         st.warning(f"⚠️ Advanced Prophet failed: {str(e)}. Using fallback method.")
-        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+        return run_fallback_forecast(data, forecast_periods), np.inf
 
 
-def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0):
+def run_advanced_ets_forecast(data, forecast_periods=12):
     """Advanced ETS with better error handling"""
     try:
         if not STATSMODELS_AVAILABLE:
-            return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+            return run_fallback_forecast(data, forecast_periods), np.inf
         
         # Create a copy to avoid modifying original data
         work_data = data.copy()
@@ -516,21 +415,21 @@ def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0):
         if len(forecast_values) != forecast_periods:
             raise ValueError(f"Expected {forecast_periods} forecast values, got {len(forecast_values)}")
         
-        # Reverse log transformation first if applied
+        # Reverse log transformation if applied
         if log_transformed:
             forecast_values = np.expm1(forecast_values)
         
         # Apply scaling and ensure positive values
-        forecast_values = np.maximum(forecast_values, 0) * scaling_factor
+        forecast_values = np.maximum(forecast_values, 0)
         
         return forecast_values, fitted_model.aic
         
     except Exception as e:
         st.warning(f"⚠️ Advanced ETS failed: {str(e)}. Using fallback method.")
-        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+        return run_fallback_forecast(data, forecast_periods), np.inf
 
 
-def run_advanced_xgb_forecast(data, forecast_periods=12, scaling_factor=1.0):
+def run_advanced_xgb_forecast(data, forecast_periods=12):
     """Simplified XGBoost forecast with better error handling"""
     try:
         # Create a copy to avoid modifying original data
@@ -566,21 +465,21 @@ def run_advanced_xgb_forecast(data, forecast_periods=12, scaling_factor=1.0):
         if len(forecasts) != forecast_periods:
             raise ValueError(f"Expected {forecast_periods} forecast values, got {len(forecasts)}")
         
-        # Reverse log transformation first if applied
+        # Reverse log transformation if applied
         if log_transformed:
             forecasts = np.expm1(forecasts)
         
         # Apply scaling and ensure positive values
-        forecasts = np.maximum(forecasts, 0) * scaling_factor
+        forecasts = np.maximum(forecasts, 0)
         
         return forecasts, 200.0
         
     except Exception as e:
         st.warning(f"⚠️ Advanced XGBoost failed: {str(e)}. Using fallback method.")
-        return run_fallback_forecast(data, forecast_periods, scaling_factor), np.inf
+        return run_fallback_forecast(data, forecast_periods), np.inf
 
 
-def run_fallback_forecast(data, forecast_periods=12, scaling_factor=1.0):
+def run_fallback_forecast(data, forecast_periods=12):
     """Robust fallback forecasting method"""
     try:
         # Create a copy to avoid modifying original data
@@ -603,23 +502,17 @@ def run_fallback_forecast(data, forecast_periods=12, scaling_factor=1.0):
             
             forecast = np.array(forecast)
             
-            # Reverse log transformation first if applied
+            # Reverse log transformation if applied
             if log_transformed:
                 forecast = np.expm1(forecast)
-            
-            # Apply scaling
-            forecast = forecast * scaling_factor
             
             return forecast
         else:
             base_forecast = work_data['Sales'].mean()
             
-            # Reverse log transformation first if applied
+            # Reverse log transformation if applied
             if log_transformed:
                 base_forecast = np.expm1(base_forecast)
-            
-            # Apply scaling
-            base_forecast = base_forecast * scaling_factor
             
             return np.array([base_forecast] * forecast_periods)
             
@@ -627,9 +520,9 @@ def run_fallback_forecast(data, forecast_periods=12, scaling_factor=1.0):
         # Ultimate fallback - use historical mean
         try:
             historical_mean = data['Sales'].mean() if len(data) > 0 else 1000
-            return np.array([historical_mean * scaling_factor] * forecast_periods)
+            return np.array([historical_mean] * forecast_periods)
         except:
-            return np.array([1000 * scaling_factor] * forecast_periods)
+            return np.array([1000] * forecast_periods)
 
 
 def create_weighted_ensemble(forecasts_dict, validation_scores):
@@ -662,57 +555,37 @@ def create_weighted_ensemble(forecasts_dict, validation_scores):
     return ensemble_forecast, weights
 
 
-def run_meta_learning_forecast(forecasts_dict, actual_data=None, forecast_periods=12):
-    """Advanced meta-learning ensemble using stacking"""
-    if actual_data is None or len(actual_data) < 12:
-        # Fallback to simple ensemble if no validation data
-        return None
-    
-    try:
-        # Simple average of all forecasts for now
-        forecast_values = list(forecasts_dict.values())
-        meta_forecast = np.mean(forecast_values, axis=0)
-        return np.maximum(meta_forecast, 0)
-    
-    except Exception as e:
-        return None
-
-
-def create_comparison_chart_for_available_months_only(result_df, forecast_year):
-    """
-    Create comparison chart only for months where actual data exists
-    """
-    actual_col = f'Actual_{forecast_year}'
-    
-    if actual_col not in result_df.columns:
-        return None
-    
-    # Filter to only months that have actual data
-    available_data = result_df[result_df[actual_col].notna()].copy()
-    
-    if len(available_data) == 0:
-        return None
-    
-    # Also filter forecast data to the same months for fair comparison
-    forecast_cols = [col for col in result_df.columns if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']]
-    
+def create_historical_vs_forecast_chart(hist_df, result_df, forecast_info):
+    """Create combined historical and forecast chart"""
     fig = go.Figure()
     
-    # Add actual data
+    # Add historical data
     fig.add_trace(go.Scatter(
-        x=available_data['Month'],
-        y=available_data[actual_col],
+        x=hist_df['Month'],
+        y=hist_df['Sales_Original'] if 'Sales_Original' in hist_df.columns else hist_df['Sales'],
         mode='lines+markers',
-        name='🎯 ACTUAL',
-        line=dict(color='#FF6B6B', width=4),
-        marker=dict(size=12, symbol='circle')
+        name='📊 Historical Data',
+        line=dict(color='#1f77b4', width=3),
+        marker=dict(size=6),
+        hovertemplate='<b>Historical</b><br>Date: %{x}<br>Sales: %{y:,.0f}<extra></extra>'
     ))
     
-    # Add forecast data for the same months
-    colors = ['#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#FF9F43', '#6C5CE7']
+    # Add vertical line at forecast start
+    fig.add_vline(
+        x=forecast_info['forecast_start'],
+        line_dash="dash",
+        line_color="red",
+        annotation_text="Forecast Start",
+        annotation_position="top"
+    )
+    
+    # Add forecast data
+    forecast_cols = [col for col in result_df.columns if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']]
+    colors = ['#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f']
+    
     for i, col in enumerate(forecast_cols):
         if col in ['Weighted_Ensemble', 'Meta_Learning']:
-            line_style = dict(color='#6C5CE7', width=3, dash='dash') if col == 'Weighted_Ensemble' else dict(color='#00D2D3', width=3, dash='dot')
+            line_style = dict(color='#6C5CE7', width=4, dash='dash') if col == 'Weighted_Ensemble' else dict(color='#00D2D3', width=4, dash='dot')
             icon = '🔥' if col == 'Weighted_Ensemble' else '🧠'
         else:
             line_style = dict(color=colors[i % len(colors)], width=2)
@@ -720,21 +593,19 @@ def create_comparison_chart_for_available_months_only(result_df, forecast_year):
         
         model_name = col.replace('_Forecast', '').replace('_', ' ').upper()
         fig.add_trace(go.Scatter(
-            x=available_data['Month'],
-            y=available_data[col],
+            x=result_df['Month'],
+            y=result_df[col],
             mode='lines+markers',
             name=f'{icon} {model_name}',
             line=line_style,
-            marker=dict(size=6)
+            marker=dict(size=6),
+            hovertemplate=f'<b>{model_name} Forecast</b><br>Date: %{{x}}<br>Sales: %{{y:,.0f}}<extra></extra>'
         ))
     
-    # Show available months in title
-    month_names = available_data['Month'].dt.strftime('%b').tolist()
-    months_text = ', '.join(month_names)
-    
+    # Update layout
     fig.update_layout(
-        title=f'🚀 ADVANCED AI MODELS vs ACTUAL PERFORMANCE<br><sub>Comparison for available months: {months_text}</sub>',
-        xaxis_title='Month',
+        title=f'🚀 HISTORICAL DATA & AI FORECASTS<br><sub>Data ends: {forecast_info["data_end_month"]} | Forecasting next 12 months</sub>',
+        xaxis_title='Date',
         yaxis_title='Sales Volume',
         height=700,
         hovermode='x unified',
@@ -750,15 +621,10 @@ def main():
     Main function to run the advanced forecasting app.
     """
     st.title("🚀 Advanced AI Sales Forecasting Dashboard")
-    st.markdown("**Next-generation forecasting with ML optimization, ensemble weighting, and meta-learning**")
+    st.markdown("**Next-generation forecasting: Upload all your data and predict the next 12 months**")
 
     # Sidebar configuration
     st.sidebar.header("⚙️ Advanced Configuration")
-    forecast_year = st.sidebar.selectbox(
-        "Select forecast year:",
-        options=[2024, 2025, 2026],
-        index=0
-    )
 
     # Advanced options
     st.sidebar.subheader("🔬 Advanced Options")
@@ -780,45 +646,36 @@ def main():
         st.sidebar.error("Please select at least one forecasting model.")
         return
 
-    # File uploads
-    st.subheader("📁 Upload Data Files")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        historical_file = st.file_uploader(
-            "📊 Upload Historical Sales Data",
-            type=["xlsx", "xls"],
-            help="Excel file with 'Month' and 'Sales' columns - will be automatically preprocessed"
-        )
-
-    with col2:
-        actual_2024_file = st.file_uploader(
-            f"📈 Upload {forecast_year} Actual Data (Optional)",
-            type=["xlsx", "xls"],
-            help="For model validation, scaling detection, and meta-learning"
-        )
+    # File upload
+    st.subheader("📁 Upload Your Complete Historical Data")
+    
+    historical_file = st.file_uploader(
+        "📊 Upload ALL Historical Sales Data",
+        type=["xlsx", "xls"],
+        help="Excel file with 'Month' and 'Sales' columns - the system will automatically predict the next 12 months from your latest data point"
+    )
 
     if historical_file is None:
-        st.info("👆 Please upload historical sales data to begin advanced forecasting.")
+        st.info("👆 Please upload your complete historical sales data to begin forecasting the next 12 months.")
         return
 
     # Load and validate historical data
-    hist_df = load_data(historical_file)
-    if hist_df is None:
+    result = load_data(historical_file)
+    if result is None or len(result) != 2:
         return
-
-    # Load actual data for scaling detection and validation
-    actual_2024_df = None
-    scaling_factor = 1.0
     
-    if actual_2024_file is not None:
-        actual_2024_df = load_actual_2024_data(actual_2024_file, forecast_year)
-        if actual_2024_df is not None:
-            scaling_factor = detect_and_apply_scaling(hist_df, actual_2024_df)
+    hist_df, forecast_info = result
 
     # Display enhanced data info
-    st.subheader("📊 Advanced Data Analysis")
+    st.subheader("📊 Data Analysis Summary")
+    
+    # Show forecast period information
+    st.success(f"""
+    **🎯 Forecast Configuration:**
+    - **Data Period:** {hist_df['Month'].min().strftime('%Y-%m')} to {forecast_info['data_end_month']}
+    - **Forecast Period:** Next 12 months starting from {forecast_info['forecast_start'].strftime('%Y-%m')}
+    - **Forecast Year:** {forecast_info['forecast_year']}
+    """)
 
     # Calculate correct metrics based on unique months
     unique_months = hist_df['Month'].nunique()  # Count unique months only
@@ -827,57 +684,7 @@ def main():
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("📅 Total Months", unique_months)  # Fixed: now shows unique months
-    with col2:
-        st.metric("📈 Avg Monthly Sales", f"{avg_monthly_sales:,.0f}")  # Fixed: true monthly average
-    with col3:
-        data_quality = min(100, unique_months * 4.17)  # Quality score based on unique months
-        st.metric("🎯 Data Quality Score", f"{data_quality:.0f}%")
-    with col4:
-        if 'log_transformed' in hist_df.columns and hist_df['log_transformed'].iloc[0]:
-            st.metric("🔧 Data Transformation", "Log Applied")
-        else:
-            st.metric("🔧 Data Transformation", "None Applied")
-
-    # Show additional data insights
-    col1, col2 = st.columns(2)
-    with col1:
-        # Date range
-        start_date = hist_df['Month'].min().strftime('%Y-%m')
-        end_date = hist_df['Month'].max().strftime('%Y-%m')
-        st.metric("📅 Data Range", f"{start_date} to {end_date}")
-        
-    with col2:
-        # Total data points vs unique months
-        total_rows = len(hist_df)
-        if total_rows > unique_months:
-            st.metric("📊 Data Points", f"{total_rows} rows ({unique_months} unique months)")
-        else:
-            st.metric("📊 Data Points", f"{total_rows}")
-
-    # Show data breakdown if there are multiple entries per month
-    if len(hist_df) > unique_months:
-        avg_entries_per_month = len(hist_df) / unique_months
-        st.info(f"📊 Your data contains multiple entries per month (avg: {avg_entries_per_month:.1f} entries/month). Sales are being aggregated by month for forecasting.")
-
-    # Show seasonality and trend analysis
-    col1, col2 = st.columns(2)
-    with col1:
-        # Seasonality detection - use monthly aggregated data
-        monthly_data = hist_df.groupby('Month')['Sales'].sum().reset_index()
-        if len(monthly_data) >= 24:
-            try:
-                if STATSMODELS_AVAILABLE:
-                    decomposition = seasonal_decompose(monthly_data['Sales'], model='additive', period=12)
-                    seasonal_strength = np.var(decomposition.seasonal) / np.var(monthly_data['Sales'])
-                    st.metric("📊 Seasonality Strength", f"{seasonal_strength:.2%}")
-                else:
-                    st.metric("📊 Seasonality", "Analysis unavailable")
-            except:
-                st.metric("📊 Seasonality", "Analysis unavailable")
-        else:
-            st.metric("📊 Seasonality", "Need 24+ months")
-        
+        st.metric("📅 Total Months", unique_months)
     with col2:
         # Trend detection - use monthly aggregated data
         if len(monthly_data) >= 12:
@@ -904,8 +711,8 @@ def main():
                 st.metric("✅ Data Points", len(hist_df))
 
     # Generate advanced forecasts
-    if st.button("🚀 Generate Advanced AI Forecasts", type="primary"):
-        st.subheader("🚀 Generating Advanced AI Forecasts...")
+    if st.button("🚀 Generate Next 12 Months Forecast", type="primary"):
+        st.subheader("🚀 Generating Advanced AI Forecasts for Next 12 Months...")
 
         # Show optimization status
         if enable_hyperopt:
@@ -915,10 +722,10 @@ def main():
         forecast_results = {}
         validation_scores = {}
 
-        # Create forecast dates
+        # Create forecast dates - next 12 months from latest data point
         forecast_dates = pd.date_range(
-            start=f"{forecast_year}-01-01",
-            end=f"{forecast_year}-12-01",
+            start=forecast_info['forecast_start'],
+            periods=12,
             freq='MS'
         )
 
@@ -937,7 +744,7 @@ def main():
             with st.spinner(f"🤖 Running advanced {model_name} with optimization..."):
                 try:
                     # Run the model with error handling
-                    result = model_func(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
+                    result = model_func(hist_df, forecast_periods=12)
                     
                     if isinstance(result, tuple) and len(result) >= 2:
                         forecast_values, validation_score = result[0], result[1]
@@ -952,7 +759,7 @@ def main():
                         # Ensure we have exactly 12 values
                         if len(forecast_values) != 12:
                             st.warning(f"⚠️ {model_name} returned {len(forecast_values)} values instead of 12. Using fallback.")
-                            forecast_values = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
+                            forecast_values = run_fallback_forecast(hist_df, forecast_periods=12)
                             validation_score = np.inf
                         
                         # Check for valid forecasts (not all zeros, not NaN/inf)
@@ -960,7 +767,7 @@ def main():
                               np.any(np.isnan(forecast_values)) or 
                               np.any(np.isinf(forecast_values))):
                             st.warning(f"⚠️ {model_name} produced invalid forecast values. Using fallback.")
-                            forecast_values = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
+                            forecast_values = run_fallback_forecast(hist_df, forecast_periods=12)
                             validation_score = np.inf
                         
                         # Store valid forecast
@@ -976,13 +783,13 @@ def main():
                         
                     else:
                         st.warning(f"⚠️ {model_name} returned invalid format. Using fallback.")
-                        fallback_forecast = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
+                        fallback_forecast = run_fallback_forecast(hist_df, forecast_periods=12)
                         forecast_results[f"{model_name}_Forecast"] = fallback_forecast
                         validation_scores[model_name] = np.inf
                     
                 except Exception as e:
                     st.error(f"❌ Advanced {model_name} failed: {str(e)}")
-                    fallback_forecast = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
+                    fallback_forecast = run_fallback_forecast(hist_df, forecast_periods=12)
                     forecast_results[f"{model_name}_Forecast"] = fallback_forecast
                     validation_scores[model_name] = np.inf
 
@@ -1004,17 +811,6 @@ def main():
                     st.info(f"🎯 Ensemble weights: {', '.join([f'{k}: {v:.1%}' for k, v in ensemble_weights.items()])}")
                 except Exception as e:
                     st.warning(f"⚠️ Ensemble creation failed: {str(e)}")
-        
-        # Meta-learning ensemble
-        if enable_meta_learning and actual_2024_df is not None:
-            with st.spinner("🧠 Training meta-learning model..."):
-                try:
-                    meta_forecast = run_meta_learning_forecast(forecast_results, actual_2024_df, forecast_periods=12)
-                    if meta_forecast is not None:
-                        forecast_results["Meta_Learning"] = meta_forecast
-                        st.success("✅ Meta-learning ensemble created successfully")
-                except Exception as e:
-                    st.warning(f"⚠️ Meta-learning failed: {str(e)}")
 
         # Create results dataframe
         result_df = pd.DataFrame({
@@ -1022,17 +818,8 @@ def main():
             **forecast_results
         })
 
-        # Merge actual data if available
-        if actual_2024_df is not None:
-            actual_2024_df['Month'] = pd.to_datetime(actual_2024_df['Month'])
-            result_df['Month'] = pd.to_datetime(result_df['Month'])
-            result_df = result_df.merge(actual_2024_df, on="Month", how="left")
-            
-            actual_count = result_df[f'Actual_{forecast_year}'].notna().sum()
-            st.success(f"📊 Loaded {actual_count} months of actual data for validation")
-
         # Display results
-        st.subheader("📊 Advanced Forecast Results")
+        st.subheader("📊 Next 12 Months Forecast Results")
         
         # Debug information - show forecast summaries
         if forecast_results:
@@ -1064,156 +851,84 @@ def main():
         
         st.dataframe(display_df, use_container_width=True)
 
-        # ADVANCED COMPARISON CHART
-        st.subheader("📊 Advanced Model Performance Comparison")
+        # COMBINED HISTORICAL AND FORECAST CHART
+        st.subheader("📊 Historical Data vs Future Forecasts")
+        
+        # Create comprehensive chart showing both historical and forecast data
+        fig = create_historical_vs_forecast_chart(hist_df, result_df, forecast_info)
+        st.plotly_chart(fig, use_container_width=True)
 
-        model_cols = [col for col in result_df.columns if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']]
-        actual_col = f'Actual_{forecast_year}'
-
-        has_actual_data = actual_col in result_df.columns and result_df[actual_col].notna().any()
-
-        if has_actual_data:
-            # Get only months with actual data
-            actual_data = result_df[result_df[actual_col].notna()].copy()
+        # Show forecast details
+        st.subheader("🎯 Forecast Analysis")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if 'Weighted_Ensemble' in result_df.columns:
+                ensemble_total = result_df['Weighted_Ensemble'].sum()
+                ensemble_avg = result_df['Weighted_Ensemble'].mean()
+                st.metric("🔥 Ensemble Total (12 months)", f"{ensemble_total:,.0f}")
+                st.metric("📊 Ensemble Monthly Average", f"{ensemble_avg:,.0f}")
+        
+        with col2:
+            # Compare to recent historical performance
+            recent_12_months = hist_df['Sales'].tail(12).sum() if len(hist_df) >= 12 else hist_df['Sales'].sum()
+            if 'Weighted_Ensemble' in result_df.columns:
+                growth_rate = ((ensemble_total - recent_12_months) / recent_12_months * 100) if recent_12_months > 0 else 0
+                st.metric("📈 Growth vs Last 12 Months", f"{growth_rate:+.1f}%")
+            st.metric("📊 Recent 12 Months Actual", f"{recent_12_months:,.0f}")
+        
+        with col3:
+            successful_models = len([v for v in validation_scores.values() if v != np.inf])
+            total_models = len(validation_scores)
+            st.metric("🤖 Models Successful", f"{successful_models}/{total_models}")
             
-            # Show info about available data coverage
-            available_months = actual_data['Month'].dt.strftime('%b %Y').tolist()
-            st.info(f"📅 **Available actual data for {len(available_months)} months:** {', '.join(available_months)}")
-            
-            # Create improved comparison chart
-            fig = create_comparison_chart_for_available_months_only(result_df, forecast_year)
-            
-            if fig:
-                st.plotly_chart(fig, use_container_width=True)
-            
-            # Advanced performance metrics - only for available months
-            st.subheader("🎯 Advanced Performance Analysis")
-            st.caption(f"Performance calculated only for months with actual data ({len(actual_data)} months)")
-            
-            performance_data = []
-            actual_total = actual_data[actual_col].sum()
-            
-            for col in model_cols:
-                model_name = col.replace('_Forecast', '').replace('_', ' ')
-                
-                # Calculate forecast total only for months with actual data
-                forecast_total = actual_data[col].sum()
-                
-                # Calculate metrics only for available months
-                metrics = calculate_accuracy_metrics(actual_data[actual_col], actual_data[col])
-                if metrics:
-                    bias = ((forecast_total - actual_total) / actual_total * 100) if actual_total > 0 else 0
-                    
-                    # Get validation score if available
-                    val_score = validation_scores.get(model_name.replace(' ', ''), 'N/A')
-                    val_score_text = f"{val_score:.2f}" if val_score != np.inf and val_score != 'N/A' else 'N/A'
-                    
-                    performance_data.append({
-                        'Model': model_name,
-                        'MAPE (%)': f"{metrics['MAPE']:.1f}%",
-                        'SMAPE (%)': f"{metrics['SMAPE']:.1f}%",
-                        'MAE': f"{metrics['MAE']:,.0f}",
-                        'RMSE': f"{metrics['RMSE']:,.0f}",
-                        'MASE': f"{metrics['MASE']:.2f}",
-                        'Total Forecast (Available Months)': f"{forecast_total:,.0f}",
-                        'Total Actual (Available Months)': f"{actual_total:,.0f}",
-                        'Bias (%)': f"{bias:+.1f}%",
-                        'Validation Score': val_score_text,
-                        'Accuracy': f"{100 - metrics['MAPE']:.1f}%",
-                        'Data Coverage': f"{len(actual_data)}/12 months"
-                    })
-            
-            if performance_data:
-                performance_df = pd.DataFrame(performance_data)
-                st.dataframe(performance_df, use_container_width=True)
-                
-                # Show best performing model
-                best_model = performance_df.loc[performance_df['MAPE (%)'].str.replace('%', '').astype(float).idxmin()]
-                st.success(f"🏆 Best performing model: **{best_model['Model']}** with {best_model['MAPE (%)']} MAPE")
-                
-                # Show data coverage info
-                coverage_pct = len(actual_data) / 12 * 100
-                if coverage_pct < 100:
-                    st.warning(f"⚠️ Performance analysis based on {len(actual_data)} months of actual data ({coverage_pct:.0f}% coverage)")
-
-        else:
-            # Forecast-only view
-            st.warning("📊 No actual data for validation. Showing advanced forecasts.")
-            
-            fig = go.Figure()
-            colors = ['#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#FF9F43', '#6C5CE7']
-            
-            for i, col in enumerate(model_cols):
-                if col in ['Weighted_Ensemble', 'Meta_Learning']:
-                    line_style = dict(color='#6C5CE7', width=3, dash='dash') if col == 'Weighted_Ensemble' else dict(color='#00D2D3', width=3, dash='dot')
-                    icon = '🔥' if col == 'Weighted_Ensemble' else '🧠'
-                else:
-                    line_style = dict(color=colors[i % len(colors)], width=2)
-                    icon = '📈'
-                
-                model_name = col.replace('_Forecast', '').replace('_', ' ').upper()
-                fig.add_trace(go.Scatter(
-                    x=result_df['Month'],
-                    y=result_df[col],
-                    mode='lines+markers',
-                    name=f'{icon} {model_name}',
-                    line=line_style,
-                    marker=dict(size=6)
-                ))
-            
-            fig.update_layout(
-                title='🚀 ADVANCED AI FORECAST MODELS COMPARISON',
-                xaxis_title='Month',
-                yaxis_title='Sales Volume',
-                height=700,
-                hovermode='x unified'
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
+            # Show model performance ranking
+            if successful_models > 0:
+                best_model = min(validation_scores, key=validation_scores.get)
+                if validation_scores[best_model] != np.inf:
+                    st.metric("🏆 Best Model", best_model)
 
         # ADVANCED EXCEL DOWNLOAD
         st.subheader("📊 Advanced Analytics Export")
         
         @st.cache_data
-        def create_advanced_excel_report(result_df, hist_df, forecast_year, scaling_factor, validation_scores, ensemble_weights=None):
+        def create_advanced_excel_report(result_df, hist_df, forecast_info, validation_scores, ensemble_weights=None):
             output = io.BytesIO()
             
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                # Sheet 1: Main Results
+                # Sheet 1: Forecast Results
                 main_sheet = result_df.copy()
                 main_sheet['Month'] = main_sheet['Month'].dt.strftime('%Y-%m-%d')
-                main_sheet.to_excel(writer, sheet_name='Advanced_Results', index=False)
+                main_sheet.to_excel(writer, sheet_name='Forecast_Results', index=False)
                 
-                # Sheet 2: Model Performance Metrics
-                actual_col = f'Actual_{forecast_year}'
-                if actual_col in result_df.columns and result_df[actual_col].notna().any():
-                    model_cols = [col for col in result_df.columns if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']]
-                    actual_subset = result_df[result_df[actual_col].notna()]
-                    
-                    perf_data = []
-                    for col in model_cols:
-                        model_name = col.replace('_Forecast', '').replace('_', ' ')
-                        metrics = calculate_accuracy_metrics(actual_subset[actual_col], actual_subset[col])
-                        
-                        if metrics:
-                            val_score = validation_scores.get(model_name.replace(' ', ''), np.inf)
-                            perf_data.append({
-                                'Model': model_name,
-                                'MAPE': round(metrics['MAPE'], 2),
-                                'SMAPE': round(metrics['SMAPE'], 2),
-                                'MAE': round(metrics['MAE'], 0),
-                                'RMSE': round(metrics['RMSE'], 0),
-                                'MASE': round(metrics['MASE'], 3),
-                                'Validation_Score': round(val_score, 2) if val_score != np.inf else 'N/A',
-                                'Total_Forecast': round(result_df[col].sum(), 0),
-                                'Scaling_Applied': f"{scaling_factor:.2f}x"
-                            })
-                    
-                    if perf_data:
-                        perf_df = pd.DataFrame(perf_data)
-                        perf_df.to_excel(writer, sheet_name='Advanced_Performance', index=False)
+                # Sheet 2: Historical Data
+                hist_sheet = hist_df.copy()
+                hist_sheet['Month'] = hist_sheet['Month'].dt.strftime('%Y-%m-%d')
+                hist_sheet.to_excel(writer, sheet_name='Historical_Data', index=False)
                 
-                # Sheet 3: Ensemble Analysis
+                # Sheet 3: Model Performance Metrics
+                model_cols = [col for col in result_df.columns if '_Forecast' in col or col in ['Weighted_Ensemble']]
+                
+                perf_data = []
+                for col in model_cols:
+                    model_name = col.replace('_Forecast', '').replace('_', ' ')
+                    val_score = validation_scores.get(model_name.replace(' ', ''), np.inf)
+                    perf_data.append({
+                        'Model': model_name,
+                        'Total_Forecast': round(result_df[col].sum(), 0),
+                        'Monthly_Average': round(result_df[col].mean(), 0),
+                        'Min_Month': round(result_df[col].min(), 0),
+                        'Max_Month': round(result_df[col].max(), 0),
+                        'Validation_Score': round(val_score, 2) if val_score != np.inf else 'N/A',
+                        'Std_Deviation': round(result_df[col].std(), 0)
+                    })
+                
+                if perf_data:
+                    perf_df = pd.DataFrame(perf_data)
+                    perf_df.to_excel(writer, sheet_name='Model_Performance', index=False)
+                
+                # Sheet 4: Ensemble Analysis
                 if ensemble_weights:
                     ensemble_data = pd.DataFrame([
                         {'Model': k, 'Weight': f"{v:.1%}", 'Weight_Numeric': v} 
@@ -1221,121 +936,179 @@ def main():
                     ])
                     ensemble_data.to_excel(writer, sheet_name='Ensemble_Weights', index=False)
                 
-                # Sheet 4: Advanced Data Analysis
-                data_analysis = []
+                # Sheet 5: Forecast Configuration
+                config_data = [
+                    {'Setting': 'Data_End_Date', 'Value': forecast_info['data_end_month']},
+                    {'Setting': 'Forecast_Start_Date', 'Value': forecast_info['forecast_start'].strftime('%Y-%m')},
+                    {'Setting': 'Forecast_Year', 'Value': forecast_info['forecast_year']},
+                    {'Setting': 'Historical_Months', 'Value': len(hist_df)},
+                    {'Setting': 'Unique_Months', 'Value': hist_df['Month'].nunique()},
+                    {'Setting': 'Data_Years', 'Value': round((hist_df['Month'].max() - hist_df['Month'].min()).days / 365.25, 1)},
+                    {'Setting': 'Hyperopt_Enabled', 'Value': enable_hyperopt},
+                    {'Setting': 'Preprocessing_Enabled', 'Value': enable_preprocessing}
+                ]
                 
-                # Seasonality analysis
-                monthly_data = hist_df.groupby('Month')['Sales'].sum().reset_index()
-                if len(monthly_data) >= 24 and STATSMODELS_AVAILABLE:
-                    try:
-                        decomposition = seasonal_decompose(monthly_data['Sales'], model='additive', period=12)
-                        seasonal_strength = np.var(decomposition.seasonal) / np.var(monthly_data['Sales'])
-                        data_analysis.append({'Metric': 'Seasonality_Strength', 'Value': seasonal_strength})
-                    except:
-                        pass
+                config_df = pd.DataFrame(config_data)
+                config_df.to_excel(writer, sheet_name='Forecast_Config', index=False)
                 
-                # Trend analysis
-                if len(monthly_data) >= 12:
-                    try:
-                        recent_trend = np.polyfit(range(len(monthly_data['Sales'].tail(12))), monthly_data['Sales'].tail(12), 1)[0]
-                        data_analysis.append({'Metric': 'Recent_Trend_Slope', 'Value': recent_trend})
-                    except:
-                        pass
+                # Sheet 6: Combined Data (Historical + Forecast)
+                combined_data = []
                 
-                # Data quality metrics
-                unique_months = hist_df['Month'].nunique()
-                data_analysis.extend([
-                    {'Metric': 'Unique_Months', 'Value': unique_months},
-                    {'Metric': 'Total_Data_Points', 'Value': len(hist_df)},
-                    {'Metric': 'Data_Quality_Score', 'Value': min(100, unique_months * 4.17)},
-                    {'Metric': 'Scaling_Factor', 'Value': scaling_factor},
-                    {'Metric': 'Log_Transformed', 'Value': hist_df.get('log_transformed', [False])[0] if len(hist_df) > 0 else False}
-                ])
-                
-                if data_analysis:
-                    analysis_df = pd.DataFrame(data_analysis)
-                    analysis_df.to_excel(writer, sheet_name='Data_Analysis', index=False)
-                
-                # Sheet 5: Feature Importance (if XGBoost was used)
-                if 'XGBoost_Forecast' in result_df.columns:
-                    # Placeholder for feature importance - would be extracted from the actual model
-                    feature_importance = pd.DataFrame({
-                        'Feature': ['lag_1', 'rolling_mean_12', 'month_sin', 'trend_12', 'seasonal_ratio'],
-                        'Importance': [0.25, 0.20, 0.15, 0.10, 0.08],
-                        'Description': [
-                            'Previous month sales',
-                            '12-month rolling average',
-                            'Monthly seasonality (sin)',
-                            '12-month trend',
-                            'Seasonal ratio'
-                        ]
+                # Add historical data
+                for _, row in hist_df.iterrows():
+                    combined_data.append({
+                        'Month': row['Month'].strftime('%Y-%m-%d'),
+                        'Sales': row['Sales_Original'] if 'Sales_Original' in row else row['Sales'],
+                        'Type': 'Historical'
                     })
-                    feature_importance.to_excel(writer, sheet_name='Feature_Importance', index=False)
+                
+                # Add forecast data (using ensemble if available)
+                forecast_col = 'Weighted_Ensemble' if 'Weighted_Ensemble' in result_df.columns else result_df.columns[1]
+                for _, row in result_df.iterrows():
+                    combined_data.append({
+                        'Month': row['Month'].strftime('%Y-%m-%d'),
+                        'Sales': row[forecast_col],
+                        'Type': 'Forecast'
+                    })
+                
+                combined_df = pd.DataFrame(combined_data)
+                combined_df.to_excel(writer, sheet_name='Combined_Timeline', index=False)
             
             output.seek(0)
             return output
         
         # Generate advanced report
         excel_data = create_advanced_excel_report(
-            result_df, hist_df, forecast_year, scaling_factor, 
-            validation_scores, ensemble_weights if 'Weighted_Ensemble' in result_df.columns else None
+            result_df, hist_df, forecast_info, validation_scores, 
+            ensemble_weights if 'Weighted_Ensemble' in result_df.columns else None
         )
         
         col1, col2 = st.columns(2)
         
         with col1:
             st.download_button(
-                label="🚀 Download Advanced Analytics Report",
+                label="🚀 Download Complete Forecast Report",
                 data=excel_data,
-                file_name=f"advanced_ai_forecast_report_{forecast_year}.xlsx",
+                file_name=f"complete_forecast_report_{forecast_info['forecast_year']}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         
         with col2:
             csv = result_df.to_csv(index=False).encode("utf-8")
             st.download_button(
-                label="📄 Download CSV Data",
+                label="📄 Download CSV Forecasts",
                 data=csv,
-                file_name=f"advanced_forecasts_{forecast_year}.csv",
+                file_name=f"next_12_months_forecasts_{forecast_info['forecast_year']}.csv",
                 mime="text/csv"
             )
         
-        # Show what's included
+        # Show what's included in the report
         st.info("""
-        **🚀 Advanced Analytics Report Contains:**
-        - **Advanced_Results**: All forecasts with intelligent weighting
-        - **Advanced_Performance**: Enhanced metrics (MAPE, SMAPE, MASE, validation scores)  
-        - **Ensemble_Weights**: Intelligent weighting based on validation performance
-        - **Data_Analysis**: Seasonality, trend, and quality analysis
-        - **Feature_Importance**: ML model feature rankings (if applicable)
+        **🚀 Complete Forecast Report Contains:**
+        - **Forecast_Results**: Next 12 months predictions from all models
+        - **Historical_Data**: Your complete historical dataset
+        - **Model_Performance**: Detailed performance metrics and statistics
+        - **Ensemble_Weights**: Intelligent model weighting (if applicable)
+        - **Forecast_Config**: Configuration settings and data summary
+        - **Combined_Timeline**: Historical and forecast data in single timeline
         """)
 
-        # Final advanced summary
-        st.subheader("🎯 Advanced Forecast Intelligence Summary")
+        # Final summary with key insights
+        st.subheader("🎯 Key Forecast Insights")
         
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            if 'Weighted_Ensemble' in result_df.columns:
-                ensemble_total = result_df['Weighted_Ensemble'].sum()
-                st.metric("🔥 Intelligent Ensemble", f"{ensemble_total:,.0f}")
-        
-        with col2:
-            if 'Meta_Learning' in result_df.columns:
-                meta_total = result_df['Meta_Learning'].sum()
-                st.metric("🧠 Meta-Learning", f"{meta_total:,.0f}")
-        
-        with col3:
-            successful_models = len([v for v in validation_scores.values() if v != np.inf])
-            total_models = len(validation_scores)
-            st.metric("🤖 Models Successful", f"{successful_models}/{total_models}")
-        
-        with col4:
-            if scaling_factor != 1.0:
-                st.metric("📊 Scaling Applied", f"{scaling_factor:.2f}x")
+        # Calculate key insights
+        if 'Weighted_Ensemble' in result_df.columns:
+            ensemble_values = result_df['Weighted_Ensemble'].values
+            
+            # Find peak and low months
+            peak_month_idx = np.argmax(ensemble_values)
+            low_month_idx = np.argmin(ensemble_values)
+            
+            peak_month = forecast_dates[peak_month_idx].strftime('%B %Y')
+            low_month = forecast_dates[low_month_idx].strftime('%B %Y')
+            
+            # Calculate quarterly forecasts
+            q1_forecast = ensemble_values[0:3].sum()
+            q2_forecast = ensemble_values[3:6].sum()
+            q3_forecast = ensemble_values[6:9].sum()
+            q4_forecast = ensemble_values[9:12].sum()
+            
+            # Display insights
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.info(f"""
+                **📊 Monthly Insights:**
+                - **Peak Month:** {peak_month} ({ensemble_values[peak_month_idx]:,.0f})
+                - **Low Month:** {low_month} ({ensemble_values[low_month_idx]:,.0f})
+                - **Monthly Range:** {ensemble_values.min():,.0f} - {ensemble_values.max():,.0f}
+                """)
+            
+            with col2:
+                st.info(f"""
+                **📈 Quarterly Forecasts:**
+                - **Q1:** {q1_forecast:,.0f}
+                - **Q2:** {q2_forecast:,.0f}
+                - **Q3:** {q3_forecast:,.0f}
+                - **Q4:** {q4_forecast:,.0f}
+                """)
+            
+            # Seasonality insights
+            if len(hist_df) >= 24:
+                st.success(f"""
+                **🔮 Forecast Summary:**
+                Your data shows clear patterns, and our advanced AI models have generated reliable forecasts for the next 12 months. 
+                The ensemble model (recommended) predicts a total of **{ensemble_total:,.0f}** in sales over the next 12 months.
+                """)
             else:
-                st.metric("📊 Scaling Applied", "None")
+                st.warning(f"""
+                **🔮 Forecast Summary:**
+                With {len(hist_df)} months of data, our models have generated forecasts for the next 12 months.
+                For best accuracy, consider gathering 24+ months of historical data. Current forecast total: **{ensemble_total:,.0f}**
+                """)
 
 
 if __name__ == "__main__":
-    main()
+    main():
+        st.metric("📈 Avg Monthly Sales", f"{avg_monthly_sales:,.0f}")
+    with col3:
+        data_quality = min(100, unique_months * 4.17)  # Quality score based on unique months
+        st.metric("🎯 Data Quality Score", f"{data_quality:.0f}%")
+    with col4:
+        if 'log_transformed' in hist_df.columns and hist_df['log_transformed'].iloc[0]:
+            st.metric("🔧 Data Transformation", "Log Applied")
+        else:
+            st.metric("🔧 Data Transformation", "None Applied")
+
+    # Show additional data insights
+    col1, col2 = st.columns(2)
+    with col1:
+        # Date range
+        start_date = hist_df['Month'].min().strftime('%Y-%m')
+        end_date = hist_df['Month'].max().strftime('%Y-%m')
+        st.metric("📅 Data Range", f"{start_date} to {end_date}")
+        
+    with col2:
+        # Years of data
+        years_of_data = (hist_df['Month'].max() - hist_df['Month'].min()).days / 365.25
+        st.metric("📊 Years of Data", f"{years_of_data:.1f} years")
+
+    # Show seasonality and trend analysis
+    col1, col2 = st.columns(2)
+    with col1:
+        # Seasonality detection - use monthly aggregated data
+        monthly_data = hist_df.groupby('Month')['Sales'].sum().reset_index()
+        if len(monthly_data) >= 24:
+            try:
+                if STATSMODELS_AVAILABLE:
+                    decomposition = seasonal_decompose(monthly_data['Sales'], model='additive', period=12)
+                    seasonal_strength = np.var(decomposition.seasonal) / np.var(monthly_data['Sales'])
+                    st.metric("📊 Seasonality Strength", f"{seasonal_strength:.2%}")
+                else:
+                    st.metric("📊 Seasonality", "Analysis unavailable")
+            except:
+                st.metric("📊 Seasonality", "Analysis unavailable")
+        else:
+            st.metric("📊 Seasonality", "Need 24+ months")
+        
+    with col2
