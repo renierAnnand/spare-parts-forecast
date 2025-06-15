@@ -715,7 +715,198 @@ def run_meta_learning_forecast(forecasts_dict, actual_data=None, forecast_period
         return None
 
 
-def create_comparison_chart_for_available_months_only(result_df, forecast_year, adjustment_percentage):
+def create_historical_sales_comparison_chart(hist_df):
+    """
+    Create a chart showing historical sales comparison across all years
+    """
+    try:
+        # Create a copy and ensure we have the right data
+        work_data = hist_df.copy()
+        
+        # Ensure Month is datetime
+        work_data['Month'] = pd.to_datetime(work_data['Month'])
+        
+        # Use original sales data if available, otherwise use processed data
+        sales_col = 'Sales_Original' if 'Sales_Original' in work_data.columns else 'Sales'
+        
+        # Extract year and month for grouping
+        work_data['Year'] = work_data['Month'].dt.year
+        work_data['Month_Name'] = work_data['Month'].dt.strftime('%b')
+        work_data['Month_Num'] = work_data['Month'].dt.month
+        
+        # Aggregate sales by month (sum all entries for each month)
+        monthly_data = work_data.groupby('Month', as_index=False).agg({
+            sales_col: 'sum',
+            'Year': 'first',
+            'Month_Name': 'first', 
+            'Month_Num': 'first'
+        }).rename(columns={sales_col: 'Sales'})
+        
+        # Get unique years
+        years = sorted(monthly_data['Year'].unique())
+        
+        if len(years) < 2:
+            # If only one year, show monthly progression
+            fig = go.Figure()
+            
+            year_data = monthly_data[monthly_data['Year'] == years[0]]
+            year_data = year_data.sort_values('Month_Num')
+            
+            fig.add_trace(go.Scatter(
+                x=year_data['Month_Name'],
+                y=year_data['Sales'],
+                mode='lines+markers',
+                name=f'{years[0]}',
+                line=dict(width=3),
+                marker=dict(size=8)
+            ))
+            
+            fig.update_layout(
+                title=f'📊 Historical Sales Data - {years[0]}',
+                xaxis_title='Month',
+                yaxis_title='Sales Volume',
+                height=500,
+                hovermode='x unified'
+            )
+        
+        else:
+            # Multiple years - show comparison
+            fig = go.Figure()
+            colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#FF9F43', '#6C5CE7']
+            
+            for i, year in enumerate(years):
+                year_data = monthly_data[monthly_data['Year'] == year]
+                year_data = year_data.sort_values('Month_Num')
+                
+                # Calculate year total for legend
+                year_total = year_data['Sales'].sum()
+                
+                fig.add_trace(go.Scatter(
+                    x=year_data['Month_Name'],
+                    y=year_data['Sales'],
+                    mode='lines+markers',
+                    name=f'{year} (Total: {year_total:,.0f})',
+                    line=dict(color=colors[i % len(colors)], width=3),
+                    marker=dict(size=8),
+                    hovertemplate=f'<b>{year}</b><br>Month: %{{x}}<br>Sales: %{{y:,.0f}}<extra></extra>'
+                ))
+            
+            # Add year-over-year growth analysis
+            if len(years) >= 2:
+                year_totals = []
+                for year in years:
+                    year_total = monthly_data[monthly_data['Year'] == year]['Sales'].sum()
+                    year_totals.append(year_total)
+                
+                # Calculate growth rates
+                growth_info = []
+                for i in range(1, len(years)):
+                    growth_rate = ((year_totals[i] - year_totals[i-1]) / year_totals[i-1]) * 100
+                    growth_info.append(f"{years[i-1]} to {years[i]}: {growth_rate:+.1f}%")
+                
+                growth_text = "<br>".join(growth_info)
+                
+                fig.update_layout(
+                    title=f'📊 Historical Sales Comparison Across Years<br><sub>Year-over-Year Growth: {growth_text}</sub>',
+                    xaxis_title='Month',
+                    yaxis_title='Sales Volume',
+                    height=600,
+                    hovermode='x unified',
+                    legend=dict(
+                        orientation="v",
+                        yanchor="top",
+                        y=1,
+                        xanchor="left",
+                        x=1.01
+                    )
+                )
+            else:
+                fig.update_layout(
+                    title='📊 Historical Sales Comparison Across Years',
+                    xaxis_title='Month',
+                    yaxis_title='Sales Volume',
+                    height=600,
+                    hovermode='x unified'
+                )
+        
+        # Customize the chart
+        fig.update_xaxes(
+            tickmode='array',
+            tickvals=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        )
+        
+        fig.update_layout(
+            showlegend=True,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(size=12)
+        )
+        
+        return fig
+        
+    except Exception as e:
+        st.error(f"Error creating historical comparison chart: {str(e)}")
+        return None
+
+
+def create_yearly_summary_table(hist_df):
+    """
+    Create a summary table showing key metrics by year
+    """
+    try:
+        # Create a copy and ensure we have the right data
+        work_data = hist_df.copy()
+        
+        # Ensure Month is datetime
+        work_data['Month'] = pd.to_datetime(work_data['Month'])
+        
+        # Use original sales data if available
+        sales_col = 'Sales_Original' if 'Sales_Original' in work_data.columns else 'Sales'
+        
+        # Extract year
+        work_data['Year'] = work_data['Month'].dt.year
+        
+        # Aggregate by month first (sum multiple entries per month)
+        monthly_data = work_data.groupby(['Year', work_data['Month'].dt.to_period('M')], as_index=False).agg({
+            sales_col: 'sum'
+        }).rename(columns={sales_col: 'Sales'})
+        
+        # Then aggregate by year
+        yearly_summary = monthly_data.groupby('Year').agg({
+            'Sales': ['sum', 'mean', 'std', 'count']
+        }).round(0)
+        
+        # Flatten column names
+        yearly_summary.columns = ['Total_Sales', 'Avg_Monthly', 'Std_Dev', 'Months_Data']
+        yearly_summary = yearly_summary.reset_index()
+        
+        # Calculate year-over-year growth
+        yearly_summary['YoY_Growth'] = yearly_summary['Total_Sales'].pct_change() * 100
+        
+        # Format for display
+        display_summary = yearly_summary.copy()
+        display_summary['Total_Sales'] = display_summary['Total_Sales'].apply(lambda x: f"{x:,.0f}")
+        display_summary['Avg_Monthly'] = display_summary['Avg_Monthly'].apply(lambda x: f"{x:,.0f}")
+        display_summary['Std_Dev'] = display_summary['Std_Dev'].apply(lambda x: f"{x:,.0f}")
+        display_summary['YoY_Growth'] = display_summary['YoY_Growth'].apply(
+            lambda x: f"{x:+.1f}%" if not pd.isna(x) else "N/A"
+        )
+        
+        # Rename columns for better display
+        display_summary = display_summary.rename(columns={
+            'Year': 'Year',
+            'Total_Sales': 'Total Annual Sales',
+            'Avg_Monthly': 'Avg Monthly Sales', 
+            'Std_Dev': 'Monthly Std Dev',
+            'Months_Data': 'Months of Data',
+            'YoY_Growth': 'YoY Growth (%)'
+        })
+        
+        return display_summary
+        
+    except Exception as e:
+        st.error(f"Error creating yearly summary: {str(e)}")
+        return None
     """
     Create comparison chart only for months where actual data exists
     """
@@ -1009,6 +1200,60 @@ def main():
                     st.info("📊 Log transformation applied to reduce skewness")
             with col3:
                 st.metric("✅ Data Points", len(hist_df))
+
+    # Historical Sales Analysis Section
+    st.subheader("📈 Historical Sales Analysis")
+    st.markdown("**Year-over-year comparison of your actual sales performance**")
+    
+    # Create historical comparison chart
+    historical_chart = create_historical_sales_comparison_chart(hist_df)
+    if historical_chart:
+        st.plotly_chart(historical_chart, use_container_width=True)
+    
+    # Show yearly summary table
+    yearly_summary = create_yearly_summary_table(hist_df)
+    if yearly_summary is not None:
+        st.subheader("📊 Yearly Performance Summary")
+        st.dataframe(yearly_summary, use_container_width=True)
+        
+        # Add insights
+        if len(yearly_summary) > 1:
+            col1, col2 = st.columns(2)
+            with col1:
+                # Best and worst performing years
+                sales_col = 'Total Annual Sales'
+                yearly_summary_numeric = yearly_summary.copy()
+                yearly_summary_numeric['Sales_Numeric'] = yearly_summary_numeric[sales_col].str.replace(',', '').astype(float)
+                
+                best_year_idx = yearly_summary_numeric['Sales_Numeric'].idxmax()
+                worst_year_idx = yearly_summary_numeric['Sales_Numeric'].idxmin()
+                
+                best_year = yearly_summary.iloc[best_year_idx]['Year']
+                worst_year = yearly_summary.iloc[worst_year_idx]['Year']
+                
+                st.success(f"🏆 **Best Year**: {best_year} ({yearly_summary.iloc[best_year_idx][sales_col]})")
+                st.info(f"📉 **Lowest Year**: {worst_year} ({yearly_summary.iloc[worst_year_idx][sales_col]})")
+                
+            with col2:
+                # Growth trends
+                growth_values = yearly_summary['YoY Growth (%)'].str.replace('%', '').str.replace('N/A', '').str.replace('+', '')
+                growth_numeric = pd.to_numeric(growth_values, errors='coerce').dropna()
+                
+                if len(growth_numeric) > 0:
+                    avg_growth = growth_numeric.mean()
+                    if avg_growth > 0:
+                        st.success(f"📈 **Avg YoY Growth**: +{avg_growth:.1f}%")
+                    else:
+                        st.warning(f"📉 **Avg YoY Growth**: {avg_growth:.1f}%")
+                    
+                    # Consistency
+                    growth_std = growth_numeric.std()
+                    if growth_std < 10:
+                        st.info("🎯 **Growth Pattern**: Consistent")
+                    else:
+                        st.info("⚡ **Growth Pattern**: Variable")
+
+    st.markdown("---")  # Separator line
 
     # Generate advanced forecasts
     if st.button("🚀 Generate Advanced AI Forecasts", type="primary"):
@@ -1357,6 +1602,36 @@ def main():
         
         with col2:
             st.info("📊 CSV contains all forecast results with adjustments applied")
+
+    # ADDITIONAL HISTORICAL ANALYSIS CHART AT BOTTOM
+    st.markdown("---")
+    st.subheader("📊 Complete Historical Sales Overview")
+    st.markdown("**Complete view of your historical sales data across all years for reference**")
+    
+    # Create a comprehensive historical chart
+    historical_overview = create_historical_sales_comparison_chart(hist_df)
+    if historical_overview:
+        st.plotly_chart(historical_overview, use_container_width=True)
+        
+        # Add some context about the historical data
+        work_data = hist_df.copy()
+        work_data['Year'] = pd.to_datetime(work_data['Month']).dt.year
+        sales_col = 'Sales_Original' if 'Sales_Original' in work_data.columns else 'Sales'
+        
+        # Calculate some overall statistics
+        years_span = work_data['Year'].max() - work_data['Year'].min() + 1
+        total_historical_sales = work_data.groupby('Month')[sales_col].sum().sum()
+        avg_annual_sales = total_historical_sales / years_span
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("📅 Years of Data", f"{years_span} years")
+        with col2:
+            st.metric("💰 Total Historical Sales", f"{total_historical_sales:,.0f}")
+        with col3:
+            st.metric("📊 Avg Annual Sales", f"{avg_annual_sales:,.0f}")
+        
+        st.info("💡 **Tip**: Use this historical overview to understand seasonal patterns and growth trends that inform your forecasting strategy.")
 
 
 if __name__ == "__main__":
