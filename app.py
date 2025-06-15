@@ -1,1226 +1,809 @@
+import streamlit as st
+
+# Configure streamlit FIRST - must be before any other st commands
+st.set_page_config(page_title="Sales Forecasting Dashboard", layout="wide")
+
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-import warnings
-warnings.filterwarnings('ignore')
+import logging
+from datetime import datetime
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+import io
 
-# Core libraries
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error, mean_squared_error, mean_absolute_percentage_error
-from sklearn.linear_model import Ridge, Lasso, ElasticNet
-
-# Time series libraries
-import xgboost as xgb
+# Forecasting libraries
 from prophet import Prophet
-from statsmodels.tsa.arima.model import ARIMA
-from statsmodels.tsa.exponential_smoothing.ets import ETSModel
+from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.seasonal import seasonal_decompose
-from statsmodels.tsa.stattools import adfuller
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
-# Deep learning (optional - install with pip install tensorflow)
-try:
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout
-    from tensorflow.keras.optimizers import Adam
-    TENSORFLOW_AVAILABLE = True
-except ImportError:
-    TENSORFLOW_AVAILABLE = False
-    print("TensorFlow not available - LSTM models will be skipped")
+# Machine learning libraries
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.linear_model import LinearRegression
 
-class ImprovedSalesPredictionSystem:
-    def __init__(self):
-        self.models = {}
-        self.scalers = {}
-        self.feature_importance = {}
-        self.ensemble_weights = {}
-        self.validation_scores = {}
+import warnings
+warnings.filterwarnings("ignore")
+
+
+@st.cache_data
+def load_data(uploaded_file):
+    """
+    Load and preprocess the historical sales data.
+    Expected columns: 'Month' and 'Sales'
+    """
+    try:
+        df = pd.read_excel(uploaded_file)
+    except Exception:
+        st.error("Could not read the uploaded file. Please ensure it's a valid Excel file.")
+        return None
+
+    if "Month" not in df.columns or "Sales" not in df.columns:
+        st.error("The file must contain 'Month' and 'Sales' columns.")
+        return None
+
+    df["Month"] = pd.to_datetime(df["Month"], errors="coerce")
+    if df["Month"].isna().any():
+        st.error("Some dates could not be parsed. Please check the 'Month' column format.")
+        return None
+
+    df["Sales"] = pd.to_numeric(df["Sales"], errors="coerce").fillna(0)
+    df["Sales"] = df["Sales"].abs()
+
+    df = df.sort_values("Month").reset_index(drop=True)
+    return df[["Month", "Sales"]]
+
+
+@st.cache_data
+def load_actual_2024_data(uploaded_file, forecast_year):
+    """
+    Load the 2024‐actuals file and return aggregated monthly sales.
+    Handles both formats:
+    1. Long format: 'Month' and 'Sales' columns
+    2. Wide format: months as columns (Jan-2024, Feb-2024, etc.)
+    """
+    try:
+        df = pd.read_excel(uploaded_file)
         
-    def load_and_prepare_data(self, sales_2024_file, sales_2022_2023_file):
-        """Load and prepare the sales data with proper formatting for Streamlit uploads"""
+        # Check if it's the standard long format
+        if "Month" in df.columns and "Sales" in df.columns:
+            # Standard format handling
+            df["Month"] = pd.to_datetime(df["Month"], errors="coerce")
+            if df["Month"].isna().any():
+                st.error("Some dates in the 2024 actuals file could not be parsed.")
+                return None
+
+            df["Sales"] = pd.to_numeric(df["Sales"], errors="coerce").fillna(0)
+            df["Sales"] = df["Sales"].abs()
+
+            # Filter to the forecast year only
+            start = pd.Timestamp(f"{forecast_year}-01-01")
+            end = pd.Timestamp(f"{forecast_year+1}-01-01")
+            df = df[(df["Month"] >= start) & (df["Month"] < end)]
+            
+            if df.empty:
+                st.warning(f"No rows in the 2024 actuals file match year {forecast_year}.")
+                return None
+
+            monthly = df.groupby("Month", as_index=False)["Sales"].sum().sort_values("Month").reset_index(drop=True)
+            return monthly.rename(columns={"Sales": f"Actual_{forecast_year}"})
         
-        try:
-            # Load 2024 data - handle both file paths and uploaded files
-            if hasattr(sales_2024_file, 'read'):  # Streamlit uploaded file
-                df_2024 = pd.read_excel(sales_2024_file)
-            else:  # File path
-                df_2024 = pd.read_excel(sales_2024_file)
+        else:
+            # Wide format handling (months as columns)
+            st.info("📊 Detected wide format data - converting to long format...")
             
-            print("=== 2024 FILE ANALYSIS ===")
-            print("Shape:", df_2024.shape)
-            print("Original columns:", df_2024.columns.tolist())
-            print("First few rows:")
-            print(df_2024.head(3))
+            # Look for month columns that match the forecast year
+            month_cols = []
+            month_patterns = [
+                f"Jan-{forecast_year}", f"Feb-{forecast_year}", f"Mar-{forecast_year}",
+                f"Apr-{forecast_year}", f"May-{forecast_year}", f"Jun-{forecast_year}",
+                f"Jul-{forecast_year}", f"Aug-{forecast_year}", f"Sep-{forecast_year}",
+                f"Oct-{forecast_year}", f"Nov-{forecast_year}", f"Dec-{forecast_year}"
+            ]
             
-            # Clean 2024 data - handle header row detection
-            first_cell = str(df_2024.iloc[0, 0]).strip() if len(df_2024) > 0 else ""
+            # Find which month columns exist in the data
+            available_months = []
+            for pattern in month_patterns:
+                if pattern in df.columns:
+                    available_months.append(pattern)
             
-            if 'item code' in first_cell.lower() or 'part' in first_cell.lower():
-                # First row contains headers, skip it
-                df_2024_data = df_2024.iloc[1:].copy()
-                print("Detected header row, skipping first row")
-            else:
-                df_2024_data = df_2024.copy()
-                print("No header row detected")
+            if not available_months:
+                st.error(f"No month columns found for {forecast_year}. Expected columns like 'Jan-{forecast_year}', 'Feb-{forecast_year}', etc.")
+                return None
             
-            # Reset index and handle column naming
-            df_2024_data = df_2024_data.reset_index(drop=True)
+            st.success(f"Found {len(available_months)} months of data: {', '.join(available_months)}")
             
-            # Identify structure based on content
-            ncols = df_2024_data.shape[1]
-            print(f"Data has {ncols} columns")
+            # Skip header rows if they exist (look for rows where first column contains "Item" or similar)
+            first_col = df.columns[0]
+            data_rows = df[~df[first_col].astype(str).str.contains("Item|Code|QTY", case=False, na=False)]
             
-            # Standard structure: part_code, description, brand, engine, then 12 months
-            if ncols >= 16:  # At least 4 metadata + 12 months
-                new_cols = ['part_code', 'description', 'brand', 'engine'] + [f'month_{i:02d}' for i in range(1, 13)]
-                df_2024_data.columns = new_cols[:ncols]
-            elif ncols >= 13:  # At least 1 metadata + 12 months
-                new_cols = ['part_code'] + [f'month_{i:02d}' for i in range(1, ncols)]
-                df_2024_data.columns = new_cols
-            else:
-                # Fallback: use original columns
-                df_2024_data.columns = [f'col_{i}' for i in range(ncols)]
-                df_2024_data = df_2024_data.rename(columns={df_2024_data.columns[0]: 'part_code'})
+            # Melt the data from wide to long format
+            melted_data = []
+            for _, row in data_rows.iterrows():
+                part_code = row[first_col]
+                for month_col in available_months:
+                    if month_col in row and pd.notna(row[month_col]):
+                        # Convert month string to datetime
+                        month_str = month_col.replace("-", "-01-")  # Jan-2024 -> Jan-01-2024
+                        try:
+                            month_date = pd.to_datetime(month_str, format="%b-%d-%Y")
+                            sales_value = pd.to_numeric(row[month_col], errors="coerce")
+                            if pd.notna(sales_value) and sales_value > 0:
+                                melted_data.append({
+                                    "Month": month_date,
+                                    "Part": part_code,
+                                    "Sales": abs(sales_value)
+                                })
+                        except:
+                            continue
             
-            print("New column names:", df_2024_data.columns.tolist())
+            if not melted_data:
+                st.error("No valid sales data found in the file.")
+                return None
             
-            # Remove rows with missing part codes
-            df_2024_data = df_2024_data.dropna(subset=['part_code'])
-            df_2024_data = df_2024_data[df_2024_data['part_code'].astype(str).str.strip() != '']
+            # Convert to DataFrame and aggregate by month
+            long_df = pd.DataFrame(melted_data)
+            monthly = long_df.groupby("Month", as_index=False)["Sales"].sum().sort_values("Month").reset_index(drop=True)
             
-            # Identify month columns
-            month_cols = [col for col in df_2024_data.columns if col.startswith('month_')]
-            if not month_cols:
-                # Try to identify by content or position
-                possible_month_cols = df_2024_data.columns[1:13] if ncols >= 13 else df_2024_data.columns[1:]
-                month_cols = [col for col in possible_month_cols if col not in ['description', 'brand', 'engine']]
+            st.success(f"✅ Converted wide format data: {len(monthly)} months of aggregated sales data")
             
-            print("Identified month columns:", month_cols)
+            return monthly.rename(columns={"Sales": f"Actual_{forecast_year}"})
             
-            # Prepare metadata columns
-            metadata_cols = ['description', 'brand', 'engine']
-            available_metadata = [col for col in metadata_cols if col in df_2024_data.columns]
-            
-            # Melt to long format
-            melt_id_vars = ['part_code'] + available_metadata
-            df_2024_long = df_2024_data.melt(
-                id_vars=melt_id_vars,
-                value_vars=month_cols,
-                var_name='month_col',
-                value_name='sales'
-            )
-            
-            # Convert month column to actual dates
-            def month_col_to_date(month_col):
-                try:
-                    if 'month_' in month_col:
-                        month_num = int(month_col.split('_')[1])
-                        return pd.to_datetime(f'2024-{month_num:02d}-01')
-                    else:
-                        # Try to extract month from column name
-                        month_mapping = {
-                            'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
-                            'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
-                        }
-                        col_lower = str(month_col).lower()
-                        for month_name, month_num in month_mapping.items():
-                            if month_name in col_lower:
-                                return pd.to_datetime(f'2024-{month_num:02d}-01')
-                        return pd.to_datetime('2024-01-01')  # Fallback
-                except:
-                    return pd.to_datetime('2024-01-01')
-            
-            df_2024_long['date'] = df_2024_long['month_col'].apply(month_col_to_date)
-            df_2024_long['sales'] = pd.to_numeric(df_2024_long['sales'], errors='coerce')
-            
-            print(f"2024 data after processing: {len(df_2024_long)} rows")
-            
-            # Load 2022-2023 historical data
-            if hasattr(sales_2022_2023_file, 'read'):  # Streamlit uploaded file
-                df_hist = pd.read_excel(sales_2022_2023_file)
-            else:  # File path
-                df_hist = pd.read_excel(sales_2022_2023_file)
-            
-            print("\n=== HISTORICAL FILE ANALYSIS ===")
-            print("Shape:", df_hist.shape)
-            print("Columns:", df_hist.columns.tolist())
-            print("First few rows:")
-            print(df_hist.head(3))
-            
-            # Smart column detection for historical data
-            col_names = df_hist.columns.tolist()
-            
-            # Find part column
-            part_col = None
-            for col in col_names:
-                if 'part' in str(col).lower():
-                    part_col = col
-                    break
-            if part_col is None:
-                part_col = col_names[0]  # Use first column as fallback
-            
-            # Find sales column
-            sales_col = None
-            for col in col_names:
-                if 'sales' in str(col).lower() or 'value' in str(col).lower():
-                    sales_col = col
-                    break
-            if sales_col is None:
-                sales_col = col_names[-1]  # Use last column as fallback
-            
-            # Find month/date column
-            date_col = None
-            for col in col_names:
-                if any(word in str(col).lower() for word in ['month', 'date', 'time']):
-                    date_col = col
-                    break
-            if date_col is None:
-                date_col = col_names[1]  # Use second column as fallback
-            
-            print(f"Detected columns - Part: {part_col}, Date: {date_col}, Sales: {sales_col}")
-            
-            # Create clean historical dataset
-            df_hist_clean = df_hist[[part_col, date_col, sales_col]].copy()
-            df_hist_clean.columns = ['part_code', 'date_raw', 'sales']
-            
-            # Convert dates
-            def safe_date_convert(date_val):
-                try:
-                    if pd.isna(date_val):
-                        return pd.NaT
-                    
-                    # Handle Excel serial dates
-                    if isinstance(date_val, (int, float)):
-                        if date_val > 40000:  # Reasonable Excel date range
-                            return pd.to_datetime('1900-01-01') + pd.to_timedelta(date_val - 2, unit='D')
-                    
-                    # Try direct conversion
-                    return pd.to_datetime(date_val)
-                    
-                except:
-                    return pd.NaT
-            
-            df_hist_clean['date'] = df_hist_clean['date_raw'].apply(safe_date_convert)
-            df_hist_clean = df_hist_clean.dropna(subset=['date'])
-            df_hist_clean['sales'] = pd.to_numeric(df_hist_clean['sales'], errors='coerce')
-            
-            print(f"Historical data after processing: {len(df_hist_clean)} rows")
-            
-            # Combine datasets
-            hist_subset = df_hist_clean[['part_code', 'date', 'sales']].copy()
-            current_subset = df_2024_long[['part_code', 'date', 'sales']].copy()
-            
-            # Ensure part_code is string in both datasets
-            hist_subset['part_code'] = hist_subset['part_code'].astype(str)
-            current_subset['part_code'] = current_subset['part_code'].astype(str)
-            
-            combined_df = pd.concat([hist_subset, current_subset], ignore_index=True)
-            
-            # Add metadata
-            if available_metadata:
-                metadata_df = df_2024_long[['part_code'] + available_metadata].drop_duplicates()
-                metadata_df['part_code'] = metadata_df['part_code'].astype(str)
-                combined_df = combined_df.merge(metadata_df, on='part_code', how='left')
-            
-            # Fill missing metadata columns
-            for col in ['description', 'brand', 'engine']:
-                if col not in combined_df.columns:
-                    combined_df[col] = 'Unknown'
-                else:
-                    combined_df[col] = combined_df[col].fillna('Unknown')
-            
-            # Final cleanup
-            combined_df = combined_df.dropna(subset=['sales'])
-            combined_df = combined_df[combined_df['sales'] >= 0]  # Remove negative sales
-            combined_df = combined_df.sort_values(['part_code', 'date']).reset_index(drop=True)
-            
-            print(f"\n=== FINAL DATASET ===")
-            print(f"Total records: {len(combined_df)}")
-            print(f"Unique parts: {combined_df['part_code'].nunique()}")
-            print(f"Date range: {combined_df['date'].min()} to {combined_df['date'].max()}")
-            print(f"Columns: {combined_df.columns.tolist()}")
-            
-            if len(combined_df) == 0:
-                raise ValueError("No valid data found after processing. Please check your file formats.")
-            
-            return combined_df
-            
-        except Exception as e:
-            error_msg = f"Error loading data: {str(e)}"
-            print(error_msg)
-            import traceback
-            print("Full traceback:")
-            print(traceback.format_exc())
-            raise Exception(error_msg)
+    except Exception as e:
+        st.error(f"Error loading 2024 actual data: {str(e)}")
+        return None
+
+
+def calculate_accuracy_metrics(actual, forecast):
+    """
+    Calculate MAPE, MAE, and RMSE between actual and forecast values.
+    """
+    if len(actual) == 0 or len(forecast) == 0:
+        return None
     
-    def engineer_features(self, df):
-        """Create advanced features for better predictions"""
-        
-        df_features = df.copy()
-        df_features = df_features.sort_values(['part_code', 'date'])
-        
-        # Time-based features
-        df_features['year'] = df_features['date'].dt.year
-        df_features['month'] = df_features['date'].dt.month
-        df_features['quarter'] = df_features['date'].dt.quarter
-        df_features['is_year_end'] = (df_features['month'] == 12).astype(int)
-        df_features['is_quarter_end'] = df_features['month'].isin([3, 6, 9, 12]).astype(int)
-        
-        # Seasonal features
-        df_features['month_sin'] = np.sin(2 * np.pi * df_features['month'] / 12)
-        df_features['month_cos'] = np.cos(2 * np.pi * df_features['month'] / 12)
-        df_features['quarter_sin'] = np.sin(2 * np.pi * df_features['quarter'] / 4)
-        df_features['quarter_cos'] = np.cos(2 * np.pi * df_features['quarter'] / 4)
-        
-        # Part-specific features
-        le_brand = LabelEncoder()
-        le_engine = LabelEncoder()
-        
-        df_features['brand_encoded'] = le_brand.fit_transform(df_features['brand'].fillna('Unknown'))
-        df_features['engine_encoded'] = le_engine.fit_transform(df_features['engine'].fillna('Unknown'))
-        
-        # Lag features and rolling statistics
-        for part in df_features['part_code'].unique():
-            mask = df_features['part_code'] == part
-            part_data = df_features[mask].copy()
-            
-            # Lag features
-            for lag in [1, 3, 6, 12]:
-                col_name = f'sales_lag_{lag}'
-                df_features.loc[mask, col_name] = part_data['sales'].shift(lag)
-            
-            # Rolling statistics
-            for window in [3, 6, 12]:
-                df_features.loc[mask, f'sales_roll_mean_{window}'] = part_data['sales'].rolling(window).mean()
-                df_features.loc[mask, f'sales_roll_std_{window}'] = part_data['sales'].rolling(window).std()
-                df_features.loc[mask, f'sales_roll_min_{window}'] = part_data['sales'].rolling(window).min()
-                df_features.loc[mask, f'sales_roll_max_{window}'] = part_data['sales'].rolling(window).max()
-            
-            # Trend features
-            df_features.loc[mask, 'sales_trend'] = part_data['sales'].pct_change(periods=3)
-            df_features.loc[mask, 'sales_momentum'] = part_data['sales'].pct_change(periods=1)
-            
-            # Seasonal decomposition features
-            if len(part_data) >= 24:  # Need at least 2 years
-                try:
-                    decomp = seasonal_decompose(part_data['sales'].dropna(), period=12, extrapolate_trend='freq')
-                    df_features.loc[mask, 'seasonal_component'] = decomp.seasonal
-                    df_features.loc[mask, 'trend_component'] = decomp.trend
-                except:
-                    df_features.loc[mask, 'seasonal_component'] = 0
-                    df_features.loc[mask, 'trend_component'] = part_data['sales']
-        
-        # Part category features (based on description keywords)
-        df_features['is_valve'] = df_features['description'].str.contains('VALVE', na=False).astype(int)
-        df_features['is_guide'] = df_features['description'].str.contains('GUIDE', na=False).astype(int)
-        df_features['is_gasket'] = df_features['description'].str.contains('GASKET', na=False).astype(int)
-        df_features['is_filter'] = df_features['description'].str.contains('FILTER', na=False).astype(int)
-        
-        return df_features
+    # Remove NaN values
+    mask = ~(pd.isna(actual) | pd.isna(forecast))
+    actual_clean = actual[mask]
+    forecast_clean = forecast[mask]
     
-    def create_time_series_splits(self, df, n_splits=5):
-        """Create proper time series cross-validation splits"""
-        
-        unique_dates = sorted(df['date'].unique())
-        total_periods = len(unique_dates)
-        
-        splits = []
-        for i in range(n_splits):
-            # Expanding window approach
-            train_end_idx = int(total_periods * (0.5 + 0.1 * i))  # Start with 50%, expand by 10% each fold
-            test_start_idx = train_end_idx
-            test_end_idx = min(train_end_idx + int(total_periods * 0.2), total_periods)  # 20% for testing
-            
-            if test_end_idx <= test_start_idx:
-                continue
-                
-            train_dates = unique_dates[:train_end_idx]
-            test_dates = unique_dates[test_start_idx:test_end_idx]
-            
-            train_idx = df[df['date'].isin(train_dates)].index
-            test_idx = df[df['date'].isin(test_dates)].index
-            
-            splits.append((train_idx, test_idx))
-        
-        return splits
+    if len(actual_clean) == 0:
+        return None
     
-    def build_improved_xgboost(self):
-        """XGBoost with proper regularization to prevent overfitting"""
-        return xgb.XGBRegressor(
-            n_estimators=100,  # Reduced to prevent overfitting
-            max_depth=4,       # Reduced depth
-            learning_rate=0.05, # Lower learning rate
-            subsample=0.8,     # Row sampling
-            colsample_bytree=0.8, # Column sampling
-            reg_alpha=1.0,     # L1 regularization
-            reg_lambda=1.0,    # L2 regularization
-            early_stopping_rounds=10,
-            random_state=42
-        )
+    # Calculate metrics
+    mape = np.mean(np.abs((actual_clean - forecast_clean) / actual_clean)) * 100
+    mae = mean_absolute_error(actual_clean, forecast_clean)
+    rmse = np.sqrt(mean_squared_error(actual_clean, forecast_clean))
     
-    def build_improved_prophet(self, df_part):
-        """Prophet with proper regularization"""
+    return {
+        "MAPE": mape,
+        "MAE": mae,
+        "RMSE": rmse
+    }
+
+
+def run_sarima_forecast(data, forecast_periods=12):
+    """
+    Run SARIMA forecast using statsmodels (replacement for pmdarima).
+    """
+    try:
+        # Use a simple SARIMA configuration
+        model = SARIMAX(data['Sales'], order=(1, 1, 1), seasonal_order=(1, 1, 1, 12))
+        fitted_model = model.fit(disp=False)
         
-        # Prepare data for Prophet
-        prophet_df = df_part[['date', 'sales']].rename(columns={'date': 'ds', 'sales': 'y'})
+        # Generate forecast
+        forecast = fitted_model.forecast(steps=forecast_periods)
+        forecast = np.maximum(forecast, 0)  # Ensure non-negative
+        
+        return forecast
+    except Exception as e:
+        st.warning(f"SARIMA failed: {str(e)}. Using simple trend method.")
+        # Fallback to simple trend
+        recent_values = data['Sales'].tail(12).values
+        trend = np.mean(np.diff(recent_values)) if len(recent_values) > 1 else 0
+        base_value = recent_values[-1] if len(recent_values) > 0 else data['Sales'].mean()
+        return np.maximum([base_value + trend * i for i in range(1, forecast_periods + 1)], 0)
+
+
+def run_prophet_forecast(data, forecast_periods=12):
+    """
+    Run Prophet forecast.
+    """
+    try:
+        prophet_data = data[['Month', 'Sales']].rename(columns={'Month': 'ds', 'Sales': 'y'})
         
         model = Prophet(
             yearly_seasonality=True,
             weekly_seasonality=False,
             daily_seasonality=False,
-            seasonality_mode='multiplicative',
-            changepoint_prior_scale=0.01,  # Reduced for less overfitting
-            seasonality_prior_scale=1.0,   # Moderate seasonality
-            n_changepoints=10,             # Reduced changepoints
-            interval_width=0.8
+            seasonality_mode='multiplicative'
+        )
+        model.fit(prophet_data)
+        
+        # Create future dates
+        future = model.make_future_dataframe(periods=forecast_periods, freq='M')
+        forecast = model.predict(future)
+        
+        # Return only the forecast period
+        forecast_values = forecast['yhat'].tail(forecast_periods).values
+        return np.maximum(forecast_values, 0)
+    except Exception as e:
+        st.warning(f"Prophet failed: {str(e)}. Using mean method.")
+        return [data['Sales'].mean()] * forecast_periods
+
+
+def run_ets_forecast(data, forecast_periods=12):
+    """
+    Run Exponential Smoothing (ETS) forecast.
+    """
+    try:
+        model = ExponentialSmoothing(
+            data['Sales'],
+            seasonal='add',
+            seasonal_periods=12,
+            trend='add'
+        )
+        fitted_model = model.fit()
+        forecast = fitted_model.forecast(steps=forecast_periods)
+        return np.maximum(forecast, 0)
+    except Exception as e:
+        st.warning(f"ETS failed: {str(e)}. Using seasonal naive method.")
+        # Fallback to seasonal naive
+        if len(data) >= 12:
+            seasonal_pattern = data['Sales'].tail(12).values
+            return np.tile(seasonal_pattern, forecast_periods // 12 + 1)[:forecast_periods]
+        else:
+            return [data['Sales'].mean()] * forecast_periods
+
+
+def run_xgb_forecast(data, forecast_periods=12):
+    """
+    Run XGBoost forecast using time series features.
+    """
+    try:
+        # Create features
+        df = data.copy()
+        df['month'] = df['Month'].dt.month
+        df['year'] = df['Month'].dt.year
+        df['quarter'] = df['Month'].dt.quarter
+        
+        # Lag features
+        for lag in [1, 2, 3, 6, 12]:
+            df[f'lag_{lag}'] = df['Sales'].shift(lag)
+        
+        # Rolling statistics
+        df['rolling_mean_3'] = df['Sales'].rolling(window=3, min_periods=1).mean()
+        df['rolling_mean_6'] = df['Sales'].rolling(window=6, min_periods=1).mean()
+        
+        # Drop NaN values
+        df = df.dropna()
+        
+        if len(df) < 12:
+            raise ValueError("Not enough data for XGBoost")
+        
+        # Prepare features and target
+        feature_cols = ['month', 'quarter'] + [col for col in df.columns if 'lag_' in col or 'rolling_' in col]
+        X = df[feature_cols]
+        y = df['Sales']
+        
+        # Train model
+        model = GradientBoostingRegressor(n_estimators=100, random_state=42)
+        model.fit(X, y)
+        
+        # Generate forecasts
+        forecasts = []
+        last_row = df.iloc[-1].copy()
+        
+        for i in range(forecast_periods):
+            # Update time features
+            future_date = df['Month'].iloc[-1] + pd.DateOffset(months=i+1)
+            last_row['month'] = future_date.month
+            last_row['quarter'] = future_date.quarter
+            
+            # Predict
+            X_pred = last_row[feature_cols].values.reshape(1, -1)
+            pred = model.predict(X_pred)[0]
+            forecasts.append(max(pred, 0))
+            
+            # Update lag features for next iteration
+            for lag in [1, 2, 3, 6, 12]:
+                if f'lag_{lag}' in last_row:
+                    if lag == 1:
+                        last_row[f'lag_{lag}'] = pred
+                    else:
+                        last_row[f'lag_{lag}'] = last_row[f'lag_{lag-1}']
+        
+        return forecasts
+    except Exception as e:
+        st.warning(f"XGBoost failed: {str(e)}. Using linear trend method.")
+        # Fallback to linear trend
+        if len(data) >= 3:
+            X = np.arange(len(data)).reshape(-1, 1)
+            y = data['Sales'].values
+            lr = LinearRegression().fit(X, y)
+            future_X = np.arange(len(data), len(data) + forecast_periods).reshape(-1, 1)
+            return np.maximum(lr.predict(future_X), 0)
+        else:
+            return [data['Sales'].mean()] * forecast_periods
+
+
+def main():
+    """
+    Main function to run the Streamlit app.
+    """
+    st.title("🔮 Spare Parts Sales Forecasting Dashboard")
+    st.markdown("**Forecast monthly sales using multiple models and compare against actuals**")
+
+    # Sidebar configuration
+    st.sidebar.header("📋 Configuration")
+    forecast_year = st.sidebar.selectbox(
+        "Select forecast year:",
+        options=[2024, 2025, 2026],
+        index=0
+    )
+
+    # Model selection
+    st.sidebar.subheader("🔧 Select Models")
+    use_sarima = st.sidebar.checkbox("SARIMA", value=True)
+    use_prophet = st.sidebar.checkbox("Prophet", value=True)
+    use_ets = st.sidebar.checkbox("ETS (Holt-Winters)", value=True)
+    use_xgb = st.sidebar.checkbox("XGBoost", value=True)
+
+    if not any([use_sarima, use_prophet, use_ets, use_xgb]):
+        st.sidebar.error("Please select at least one forecasting model.")
+        return
+
+    # File uploads
+    st.subheader("📁 Upload Data Files")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        historical_file = st.file_uploader(
+            "📊 Upload Historical Sales Data",
+            type=["xlsx", "xls"],
+            help="Excel file with 'Month' and 'Sales' columns"
+        )
+
+    with col2:
+        actual_2024_file = st.file_uploader(
+            f"📈 Upload {forecast_year} Actual Data (Optional)",
+            type=["xlsx", "xls"],
+            help="For comparison with forecasts"
+        )
+
+    if historical_file is None:
+        st.info("👆 Please upload historical sales data to begin forecasting.")
+        return
+
+    # Load and validate historical data
+    hist_df = load_data(historical_file)
+    if hist_df is None:
+        return
+
+    # Display data info
+    st.subheader("📊 Data Overview")
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.metric("📅 Total Months", len(hist_df))
+    with col2:
+        st.metric("📈 Avg Monthly Sales", f"{hist_df['Sales'].mean():,.0f}")
+    with col3:
+        st.metric("📋 Date Range", f"{hist_df['Month'].min().strftime('%Y-%m')} to {hist_df['Month'].max().strftime('%Y-%m')}")
+    with col4:
+        st.metric("💰 Total Sales", f"{hist_df['Sales'].sum():,.0f}")
+
+    # Show historical data preview
+    with st.expander("👀 Preview Historical Data"):
+        st.dataframe(hist_df.head(12), use_container_width=True)
+
+    # Generate forecasts
+    st.subheader("🔮 Generating Forecasts...")
+
+    progress_bar = st.progress(0)
+    forecast_results = {}
+
+    # Create forecast dates
+    last_date = hist_df['Month'].max()
+    
+    # Generate forecast dates for the selected forecast year
+    forecast_dates = pd.date_range(
+        start=f"{forecast_year}-01-01",
+        end=f"{forecast_year}-12-01",
+        freq='MS'  # Month start
+    )
+
+    # Run each selected model
+    models_to_run = []
+    if use_sarima:
+        models_to_run.append(("SARIMA", run_sarima_forecast))
+    if use_prophet:
+        models_to_run.append(("Prophet", run_prophet_forecast))
+    if use_ets:
+        models_to_run.append(("ETS", run_ets_forecast))
+    if use_xgb:
+        models_to_run.append(("XGBoost", run_xgb_forecast))
+
+    for i, (model_name, model_func) in enumerate(models_to_run):
+        with st.spinner(f"Running {model_name} model..."):
+            try:
+                forecast_values = model_func(hist_df, forecast_periods=12)
+                forecast_results[f"{model_name}_Forecast"] = forecast_values
+                st.success(f"✅ {model_name} completed successfully")
+            except Exception as e:
+                st.error(f"❌ {model_name} failed: {str(e)}")
+                forecast_results[f"{model_name}_Forecast"] = [hist_df['Sales'].mean()] * 12
+
+        progress_bar.progress((i + 1) / len(models_to_run))
+
+    # Create ensemble forecast
+    if len(forecast_results) > 1:
+        ensemble_values = np.mean(list(forecast_results.values()), axis=0)
+        forecast_results["Ensemble_Forecast"] = ensemble_values
+
+    # Create results dataframe
+    result_df = pd.DataFrame({
+        "Month": forecast_dates,
+        **forecast_results
+    })
+
+    # Load and merge actual data if provided
+    actual_2024_df = None
+    if actual_2024_file is not None:
+        actual_2024_df = load_actual_2024_data(actual_2024_file, forecast_year)
+        if actual_2024_df is not None:
+            st.success(f"✅ Loaded {len(actual_2024_df)} months of actual data")
+            
+            # Ensure proper date alignment
+            actual_2024_df['Month'] = pd.to_datetime(actual_2024_df['Month'])
+            result_df['Month'] = pd.to_datetime(result_df['Month'])
+            
+            # Merge actual data with forecasts
+            result_df = result_df.merge(actual_2024_df, on="Month", how="left")
+            
+            # Show merge results
+            actual_count = result_df[f'Actual_{forecast_year}'].notna().sum()
+            st.info(f"📊 Successfully merged actual data: {actual_count} out of 12 months have actual values")
+            
+            # Debug: Show actual data summary
+            if actual_count > 0:
+                actual_total = result_df[f'Actual_{forecast_year}'].sum()
+                st.success(f"📈 Total actual sales for {forecast_year}: {actual_total:,.0f}")
+            else:
+                st.warning("⚠️ No actual data matched the forecast months. Check date formats.")
+                # Show what actual dates we have
+                st.write("Actual data dates found:", actual_2024_df['Month'].dt.strftime('%Y-%m').tolist())
+                st.write("Forecast dates expected:", result_df['Month'].dt.strftime('%Y-%m').tolist())
+
+    # Display results
+    st.subheader("📊 Forecast Results")
+
+    # Show forecast table
+    display_df = result_df.copy()
+    display_df['Month'] = display_df['Month'].dt.strftime('%Y-%m')
+    
+    # Format numbers for display
+    for col in display_df.columns:
+        if col != 'Month':
+            display_df[col] = display_df[col].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "N/A")
+    
+    st.dataframe(display_df, use_container_width=True)
+
+    # Show accuracy metrics if actual data is available
+    model_cols = [col for col in result_df.columns if '_Forecast' in col]
+    if f'Actual_{forecast_year}' in result_df.columns and not result_df[f'Actual_{forecast_year}'].isna().all():
+        st.subheader("🎯 Model Accuracy Analysis")
+        
+        accuracy_data = []
+        for col in model_cols:
+            metrics = calculate_accuracy_metrics(result_df[f'Actual_{forecast_year}'], result_df[col])
+            if metrics:
+                accuracy_data.append({
+                    'Model': col.replace('_Forecast', ''),
+                    'MAPE (%)': f"{metrics['MAPE']:.1f}%",
+                    'MAE': f"{metrics['MAE']:,.0f}",
+                    'RMSE': f"{metrics['RMSE']:,.0f}",
+                    'Accuracy': f"{100 - metrics['MAPE']:.1f}%"
+                })
+
+        if accuracy_data:
+            accuracy_df = pd.DataFrame(accuracy_data)
+            st.dataframe(accuracy_df, use_container_width=True)
+
+    # 9) ACTUAL VS MODELS COMPARISON CHART
+    st.subheader("📊 Actual vs Models Comparison")
+    
+    # Get model columns
+    model_cols = [col for col in result_df.columns if '_Forecast' in col and col != 'Ensemble_Forecast']
+    actual_col = f'Actual_{forecast_year}'
+    
+    # Create the comparison chart
+    fig = go.Figure()
+    
+    # Check if we have actual data
+    has_actual_data = actual_col in result_df.columns and result_df[actual_col].notna().any()
+    
+    if has_actual_data:
+        # Filter out NaN values for actual data display
+        actual_data = result_df[result_df[actual_col].notna()]
+        
+        st.info(f"📊 Displaying actual data for {len(actual_data)} months")
+        
+        # Add actual data line
+        fig.add_trace(go.Scatter(
+            x=actual_data['Month'],
+            y=actual_data[actual_col],
+            mode='lines+markers',
+            name=f'🎯 ACTUAL {forecast_year}',
+            line=dict(color='#FF6B6B', width=4),
+            marker=dict(size=10, symbol='circle')
+        ))
+        
+        # Add each model
+        colors = ['#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD']
+        for i, col in enumerate(model_cols):
+            model_name = col.replace('_Forecast', '')
+            fig.add_trace(go.Scatter(
+                x=result_df['Month'],
+                y=result_df[col],
+                mode='lines+markers',
+                name=f'📈 {model_name.upper()}',
+                line=dict(color=colors[i % len(colors)], width=2),
+                marker=dict(size=6)
+            ))
+        
+        # Add ensemble if available
+        if 'Ensemble_Forecast' in result_df.columns:
+            fig.add_trace(go.Scatter(
+                x=result_df['Month'],
+                y=result_df['Ensemble_Forecast'],
+                mode='lines+markers',
+                name='🔥 ENSEMBLE',
+                line=dict(color='#6C5CE7', width=3, dash='dash'),
+                marker=dict(size=8)
+            ))
+        
+        fig.update_layout(
+            title=f'🔄 ACTUAL vs ALL MODELS COMPARISON ({forecast_year})',
+            xaxis_title='Month',
+            yaxis_title='Sales Volume',
+            height=600,
+            hovermode='x unified',
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="center",
+                x=0.5
+            )
         )
         
-        return model, prophet_df
-    
-    def build_lstm_model(self, input_shape):
-        """LSTM model for time series prediction"""
-        if not TENSORFLOW_AVAILABLE:
-            return None
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Show detailed comparison metrics
+        st.subheader("📋 Detailed Model Performance")
+        
+        # Create detailed comparison table
+        comparison_data = []
+        actual_total = actual_data[actual_col].sum()
+        
+        for col in model_cols:
+            model_name = col.replace('_Forecast', '')
+            forecast_total = result_df[col].sum()
             
-        model = Sequential([
-            LSTM(50, return_sequences=True, input_shape=input_shape),
-            Dropout(0.2),
-            LSTM(50, return_sequences=False),
-            Dropout(0.2),
-            Dense(25),
-            Dense(1)
-        ])
-        
-        model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
-        return model
-    
-    def prepare_lstm_data(self, series, lookback=12):
-        """Prepare data for LSTM training"""
-        X, y = [], []
-        for i in range(lookback, len(series)):
-            X.append(series[i-lookback:i])
-            y.append(series[i])
-        return np.array(X), np.array(y)
-    
-    def train_models_for_part(self, df_part, part_code):
-        """Train all models for a specific part"""
-        
-        if len(df_part) < 24:  # Need at least 2 years of data
-            print(f"Insufficient data for part {part_code}")
-            return None
-        
-        df_part = df_part.sort_values('date').reset_index(drop=True)
-        
-        # Prepare features
-        feature_cols = [col for col in df_part.columns if col.startswith(('sales_lag', 'sales_roll', 'month', 'quarter', 
-                                                                         'year', 'brand_encoded', 'engine_encoded',
-                                                                         'seasonal_component', 'trend_component',
-                                                                         'is_valve', 'is_guide', 'is_gasket', 'is_filter'))]
-        
-        # Remove rows with NaN values (from lag features)
-        df_clean = df_part.dropna(subset=feature_cols + ['sales'])
-        
-        if len(df_clean) < 12:
-            return None
-        
-        X = df_clean[feature_cols].values
-        y = df_clean['sales'].values
-        
-        # Scale features
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
-        
-        # Time series cross-validation
-        cv_splits = self.create_time_series_splits(df_clean, n_splits=3)
-        
-        models = {}
-        cv_scores = {}
-        
-                # XGBoost with regularization
-        print(f"Training XGBoost for part {part_code}")
-        xgb_scores = []
-        
-        for train_idx, test_idx in cv_splits:
-            X_train, X_test = X_scaled[train_idx], X_scaled[test_idx]
-            y_train, y_test = y[train_idx], y[test_idx]
-            
-            try:
-                # Check for valid data
-                if len(y_test) == 0 or np.all(y_test == 0):
-                    print(f"Invalid test data for XGBoost CV in part {part_code}")
-                    continue
-                    
-                xgb_model_cv = self.build_improved_xgboost()
-                xgb_model_cv.fit(X_train, y_train, 
-                             eval_set=[(X_test, y_test)], 
-                             verbose=False)
-                
-                pred = xgb_model_cv.predict(X_test)
-                
-                # Safe MAPE calculation
-                # MAPE = mean(|actual - predicted| / |actual|) * 100
-                # Avoid division by zero by adding small epsilon to denominator
-                epsilon = 1e-8
-                mape_values = np.abs(y_test - pred) / (np.abs(y_test) + epsilon) * 100
-                score = np.mean(mape_values)
-                
-                # Cap extreme values
-                score = min(score, 1000)  # Cap at 1000% error
-                xgb_scores.append(score)
-                
-            except Exception as e:
-                print(f"XGBoost CV iteration failed for part {part_code}: {e}")
-                continue
-        
-        # Final fit on all data
-        try:
-            final_xgb = self.build_improved_xgboost()
-            final_xgb.fit(X_scaled, y, verbose=False)
-            models['xgboost'] = final_xgb
-            cv_scores['xgboost'] = np.mean(xgb_scores) if xgb_scores else float('inf')
-        except Exception as e:
-            print(f"Final XGBoost training failed for part {part_code}: {e}")
-        
-        # Prophet
-        try:
-            print(f"Training Prophet for part {part_code}")
-            prophet_scores = []
-            
-            for train_idx, test_idx in cv_splits:
-                train_data = df_clean.iloc[train_idx][['date', 'sales']].rename(columns={'date': 'ds', 'sales': 'y'})
-                test_data = df_clean.iloc[test_idx][['date', 'sales']].rename(columns={'date': 'ds', 'sales': 'y'})
-                
-                try:
-                    prophet_model = Prophet(
-                        yearly_seasonality=True,
-                        weekly_seasonality=False,
-                        daily_seasonality=False,
-                        seasonality_mode='multiplicative',
-                        changepoint_prior_scale=0.01,
-                        seasonality_prior_scale=1.0,
-                        n_changepoints=10,
-                        interval_width=0.8
-                    )
-                    
-                    prophet_model.fit(train_data)
-                    forecast = prophet_model.predict(test_data[['ds']])
-                    
-                    pred = forecast['yhat'].values
-                    actual = test_data['y'].values
-                    score = mean_absolute_percentage_error(actual, pred)
-                    prophet_scores.append(score)
-                except Exception as e:
-                    print(f"Prophet CV iteration failed: {e}")
-                    prophet_scores.append(float('inf'))
-            
-            # Final Prophet model
-            try:
-                final_prophet = Prophet(
-                    yearly_seasonality=True,
-                    weekly_seasonality=False,
-                    daily_seasonality=False,
-                    seasonality_mode='multiplicative',
-                    changepoint_prior_scale=0.01,
-                    seasonality_prior_scale=1.0,
-                    n_changepoints=10,
-                    interval_width=0.8
-                )
-                
-                prophet_df = df_clean[['date', 'sales']].rename(columns={'date': 'ds', 'sales': 'y'})
-                final_prophet.fit(prophet_df)
-                models['prophet'] = final_prophet
-                cv_scores['prophet'] = np.mean(prophet_scores) if prophet_scores else float('inf')
-            except Exception as e:
-                print(f"Final Prophet training failed for part {part_code}: {e}")
-                
-        except Exception as e:
-            print(f"Prophet failed for part {part_code}: {e}")
-        
-        # Simple Moving Average as baseline
-        try:
-            print(f"Training Moving Average for part {part_code}")
-            ma_scores = []
-            
-            for train_idx, test_idx in cv_splits:
-                y_train, y_test = y[train_idx], y[test_idx]
-                
-                # Simple 3-month moving average
-                if len(y_train) >= 3:
-                    ma_pred = np.mean(y_train[-3:])  # Use last 3 months
-                    ma_pred_array = np.full(len(y_test), ma_pred)
-                    
-                    # Safe MAPE calculation for Moving Average
-                    if len(y_test) > 0 and not np.all(y_test == 0):
-                        epsilon = 1e-8
-                        mape_values = np.abs(y_test - ma_pred_array) / (np.abs(y_test) + epsilon) * 100
-                        score = np.mean(mape_values)
-                        score = min(score, 1000)  # Cap at 1000% error
-                        ma_scores.append(score)
-            
-            # Store moving average model (just the last 3 values)
-            if len(y) >= 3:
-                models['moving_average'] = {'last_values': y[-3:].tolist()}
-                cv_scores['moving_average'] = np.mean(ma_scores) if ma_scores else float('inf')
-                
-        except Exception as e:
-            print(f"Moving Average failed for part {part_code}: {e}")
-        
-        # Ridge Regression
-        try:
-            print(f"Training Ridge for part {part_code}")
-            ridge_scores = []
-            
-            for train_idx, test_idx in cv_splits:
-                X_train, X_test = X_scaled[train_idx], X_scaled[test_idx]
-                y_train, y_test = y[train_idx], y[test_idx]
-                
-                ridge_model = Ridge(alpha=1.0)
-                ridge_model.fit(X_train, y_train)
-                pred = ridge_model.predict(X_test)
-                
-                # Safe MAPE calculation for Ridge
-                if len(y_test) > 0 and not np.all(y_test == 0):
-                    epsilon = 1e-8
-                    mape_values = np.abs(y_test - pred) / (np.abs(y_test) + epsilon) * 100
-                    score = np.mean(mape_values)
-                    score = min(score, 1000)  # Cap at 1000% error
-                    ridge_scores.append(score)
-            
-            # Final Ridge model
-            final_ridge = Ridge(alpha=1.0)
-            final_ridge.fit(X_scaled, y)
-            models['ridge'] = final_ridge
-            cv_scores['ridge'] = np.mean(ridge_scores) if ridge_scores else float('inf')
-            
-        except Exception as e:
-            print(f"Ridge failed for part {part_code}: {e}")
-        
-        # LSTM (if TensorFlow is available and enough data)
-        if TENSORFLOW_AVAILABLE and len(df_clean) >= 36:
-            try:
-                print(f"Training LSTM for part {part_code}")
-                lstm_scores = []
-                
-                for train_idx, test_idx in cv_splits:
-                    y_train, y_test = y[train_idx], y[test_idx]
-                    
-                    if len(y_train) >= 24:  # Need enough data for LSTM
-                        X_lstm_train, y_lstm_train = self.prepare_lstm_data(y_train, lookback=12)
-                        
-                        if len(X_lstm_train) > 0:
-                            lstm_model = self.build_lstm_model((12, 1))
-                            X_lstm_train = X_lstm_train.reshape((X_lstm_train.shape[0], X_lstm_train.shape[1], 1))
-                            
-                            lstm_model.fit(X_lstm_train, y_lstm_train, epochs=50, batch_size=32, verbose=0)
-                            
-                            # Simple prediction using last 12 values
-                            if len(y_train) >= 12:
-                                last_sequence = y_train[-12:].reshape(1, 12, 1)
-                                lstm_pred = lstm_model.predict(last_sequence)[0, 0]
-                                lstm_pred_array = np.full(len(y_test), lstm_pred)
-                                score = mean_absolute_percentage_error(y_test, lstm_pred_array)
-                                lstm_scores.append(score)
-                
-                # Final LSTM model
-                if len(y) >= 24:
-                    X_lstm_all, y_lstm_all = self.prepare_lstm_data(y, lookback=12)
-                    if len(X_lstm_all) > 0:
-                        X_lstm_all = X_lstm_all.reshape((X_lstm_all.shape[0], X_lstm_all.shape[1], 1))
-                        
-                        final_lstm = self.build_lstm_model((12, 1))
-                        final_lstm.fit(X_lstm_all, y_lstm_all, epochs=100, batch_size=32, verbose=0)
-                        
-                        models['lstm'] = final_lstm
-                        cv_scores['lstm'] = np.mean(lstm_scores) if lstm_scores else float('inf')
-                        
-            except Exception as e:
-                print(f"LSTM failed for part {part_code}: {e}")
-        
-        print(f"Completed training for part {part_code}. Models: {list(models.keys())}")
-        
-        return {
-            'models': models,
-            'cv_scores': cv_scores,
-            'scaler': scaler,
-            'feature_cols': feature_cols,
-            'recent_sales': y[-12:].tolist() if len(y) >= 12 else y.tolist()  # Store recent sales for prediction
-        }
-    
-    def create_ensemble_predictions(self, models_dict, method='weighted_avg'):
-        """Create ensemble predictions with different weighting strategies - DEPRECATED"""
-        # This method is now replaced by the logic in predict_next_month
-        # Keeping for backward compatibility
-        return None
-    
-    def train_system(self, df):
-        """Train the complete prediction system"""
-        
-        print("Training improved sales prediction system...")
-        
-        # Engineer features
-        print("Engineering features...")
-        df_features = self.engineer_features(df)
-        
-        # Train models for each part
-        print("Training models for each part...")
-        
-        part_results = {}
-        for part_code in df_features['part_code'].unique():
-            print(f"Training models for part: {part_code}")
-            
-            df_part = df_features[df_features['part_code'] == part_code].copy()
-            result = self.train_models_for_part(df_part, part_code)
-            
-            if result:
-                part_results[part_code] = result
-        
-        self.models = part_results
-        print(f"Training completed for {len(part_results)} parts")
-        
-        return part_results
-    
-    def predict_next_month(self, df, part_code, months_ahead=1):
-        """Make predictions for the next month(s)"""
-        
-        if part_code not in self.models:
-            return None
-        
-        model_data = self.models[part_code]
-        models = model_data['models']
-        cv_scores = model_data['cv_scores']
-        
-        predictions = {}
-        
-        try:
-            # XGBoost prediction
-            if 'xgboost' in models:
-                try:
-                    scaler = model_data['scaler']
-                    feature_cols = model_data['feature_cols']
-                    
-                    # Get latest data for the part
-                    df_part = df[df['part_code'] == part_code].sort_values('date')
-                    
-                    if len(df_part) > 0:
-                        # Engineer features for the latest data
-                        df_features = self.engineer_features(df)
-                        df_part_features = df_features[df_features['part_code'] == part_code].sort_values('date')
-                        
-                        # Get the most recent complete record
-                        latest_features = df_part_features[feature_cols].dropna()
-                        
-                        if len(latest_features) > 0:
-                            X_latest = scaler.transform(latest_features.iloc[-1:].values)
-                            xgb_pred = models['xgboost'].predict(X_latest)[0]
-                            predictions['xgboost'] = max(0, xgb_pred)  # Ensure non-negative
-                except Exception as e:
-                    print(f"XGBoost prediction failed for {part_code}: {e}")
-            
-            # Prophet prediction
-            if 'prophet' in models:
-                try:
-                    prophet_model = models['prophet']
-                    
-                    # Get last date and predict next month
-                    df_part = df[df['part_code'] == part_code].sort_values('date')
-                    if len(df_part) > 0:
-                        last_date = df_part['date'].max()
-                        next_date = last_date + pd.DateOffset(months=1)
-                        
-                        future_df = pd.DataFrame({'ds': [next_date]})
-                        forecast = prophet_model.predict(future_df)
-                        
-                        prophet_pred = forecast['yhat'].values[0]
-                        predictions['prophet'] = max(0, prophet_pred)
-                except Exception as e:
-                    print(f"Prophet prediction failed for {part_code}: {e}")
-            
-            # Moving Average prediction
-            if 'moving_average' in models:
-                try:
-                    last_values = model_data['models']['moving_average']['last_values']
-                    ma_pred = np.mean(last_values)
-                    predictions['moving_average'] = max(0, ma_pred)
-                except Exception as e:
-                    print(f"Moving Average prediction failed for {part_code}: {e}")
-            
-            # Ridge prediction
-            if 'ridge' in models:
-                try:
-                    scaler = model_data['scaler']
-                    feature_cols = model_data['feature_cols']
-                    
-                    # Get latest data for the part
-                    df_part = df[df['part_code'] == part_code].sort_values('date')
-                    
-                    if len(df_part) > 0:
-                        # Engineer features for the latest data
-                        df_features = self.engineer_features(df)
-                        df_part_features = df_features[df_features['part_code'] == part_code].sort_values('date')
-                        
-                        # Get the most recent complete record
-                        latest_features = df_part_features[feature_cols].dropna()
-                        
-                        if len(latest_features) > 0:
-                            X_latest = scaler.transform(latest_features.iloc[-1:].values)
-                            ridge_pred = models['ridge'].predict(X_latest)[0]
-                            predictions['ridge'] = max(0, ridge_pred)
-                except Exception as e:
-                    print(f"Ridge prediction failed for {part_code}: {e}")
-            
-            # LSTM prediction
-            if 'lstm' in models:
-                try:
-                    recent_sales = model_data['recent_sales']
-                    if len(recent_sales) >= 12:
-                        lstm_input = np.array(recent_sales[-12:]).reshape(1, 12, 1)
-                        lstm_pred = models['lstm'].predict(lstm_input)[0, 0]
-                        predictions['lstm'] = max(0, lstm_pred)
-                except Exception as e:
-                    print(f"LSTM prediction failed for {part_code}: {e}")
-            
-            # If no predictions were successful, use simple average of recent sales
-            if not predictions:
-                df_part = df[df['part_code'] == part_code].sort_values('date')
-                if len(df_part) >= 3:
-                    recent_avg = df_part['sales'].tail(3).mean()
-                    predictions['fallback'] = max(0, recent_avg)
-            
-            # Create ensemble prediction
-            if predictions:
-                # Weight by inverse of CV score (lower error = higher weight)
-                weights = {}
-                total_weight = 0
-                
-                for model_name in predictions.keys():
-                    if model_name in cv_scores and cv_scores[model_name] != float('inf'):
-                        weight = 1 / (cv_scores[model_name] + 0.01)  # Add small epsilon
-                        weights[model_name] = weight
-                        total_weight += weight
-                    else:
-                        weights[model_name] = 1.0  # Default weight
-                        total_weight += 1.0
-                
-                if total_weight == 0:
-                    ensemble_pred = np.mean(list(predictions.values()))
-                else:
-                    # Normalize weights and compute weighted average
-                    ensemble_pred = 0
-                    for model_name, pred in predictions.items():
-                        normalized_weight = weights[model_name] / total_weight
-                        ensemble_pred += pred * normalized_weight
-                
-                return {
-                    'part_code': part_code,
-                    'predicted_sales': ensemble_pred,
-                    'individual_predictions': predictions,
-                    'models_used': list(predictions.keys()),
-                    'cv_scores': cv_scores,
-                    'weights_used': weights if total_weight > 0 else {}
-                }
-            
-            return None
-            
-        except Exception as e:
-            print(f"Overall prediction failed for part {part_code}: {e}")
-            return None
-    
-    def evaluate_system_performance(self, df):
-        """Evaluate the overall system performance"""
-        
-        print("Evaluating system performance...")
-        
-        results = []
-        
-        for part_code in self.models.keys():
-            try:
-                model_data = self.models[part_code]
-                cv_scores = model_data['cv_scores']
-                
-                # Filter out infinite scores and invalid values
-                valid_scores = {name: score for name, score in cv_scores.items() 
-                               if score != float('inf') and not np.isnan(score) and score > 0}
-                
-                if valid_scores:
-                    # Calculate ensemble score (weighted average of individual model scores)
-                    weights = {name: 1/(score + 0.01) for name, score in valid_scores.items()}
-                    total_weight = sum(weights.values())
-                    
-                    if total_weight > 0:
-                        ensemble_score = sum(score * (weights[name]/total_weight) 
-                                           for name, score in valid_scores.items())
-                    else:
-                        ensemble_score = np.mean(list(valid_scores.values()))
-                    
-                    # Find best and worst models
-                    best_model = min(valid_scores.items(), key=lambda x: x[1])
-                    worst_model = max(valid_scores.items(), key=lambda x: x[1])
-                    
-                    results.append({
-                        'part_code': part_code,
-                        'ensemble_mape': ensemble_score,
-                        'best_model': best_model[0],
-                        'best_model_score': best_model[1],
-                        'worst_model': worst_model[0],
-                        'worst_model_score': worst_model[1],
-                        'model_count': len(valid_scores),
-                        'total_models_attempted': len(cv_scores)
+            # Calculate metrics only for months with actual data
+            actual_subset = result_df[result_df[actual_col].notna()]
+            if len(actual_subset) > 0:
+                metrics = calculate_accuracy_metrics(actual_subset[actual_col], actual_subset[col])
+                if metrics:
+                    bias = ((forecast_total - actual_total) / actual_total * 100) if actual_total > 0 else 0
+                    comparison_data.append({
+                        'Model': model_name,
+                        'MAPE (%)': f"{metrics['MAPE']:.1f}%",
+                        'MAE': f"{metrics['MAE']:,.0f}",
+                        'Total Forecast': f"{forecast_total:,.0f}",
+                        'Total Actual': f"{actual_total:,.0f}",
+                        'Bias (%)': f"{bias:+.1f}%",
+                        'Accuracy': f"{100 - metrics['MAPE']:.1f}%"
                     })
-                else:
-                    # No valid scores - use fallback
-                    results.append({
-                        'part_code': part_code,
-                        'ensemble_mape': 100.0,  # High error score for no valid models
-                        'best_model': 'none',
-                        'best_model_score': float('inf'),
-                        'worst_model': 'none',
-                        'worst_model_score': float('inf'),
-                        'model_count': 0,
-                        'total_models_attempted': len(cv_scores)
-                    })
-                    
-            except Exception as e:
-                print(f"Error evaluating part {part_code}: {e}")
-                # Add a default entry for failed parts
-                results.append({
-                    'part_code': part_code,
-                    'ensemble_mape': 999.0,  # Very high error score
-                    'best_model': 'error',
-                    'best_model_score': float('inf'),
-                    'worst_model': 'error', 
-                    'worst_model_score': float('inf'),
-                    'model_count': 0,
-                    'total_models_attempted': 0
-                })
         
-        if not results:
-            print("No results to evaluate!")
-            return pd.DataFrame()
-        
-        results_df = pd.DataFrame(results)
-        
-        # Filter out parts with no valid models for summary statistics
-        valid_results = results_df[results_df['model_count'] > 0]
-        
-        print(f"\nSystem Performance Summary:")
-        if len(valid_results) > 0:
-            print(f"Parts with valid models: {len(valid_results)}/{len(results_df)}")
-            print(f"Average Ensemble MAPE: {valid_results['ensemble_mape'].mean():.2f}%")
-            print(f"Median Ensemble MAPE: {valid_results['ensemble_mape'].median():.2f}%")
-            print(f"Best performing part: {valid_results.loc[valid_results['ensemble_mape'].idxmin(), 'part_code']} ({valid_results['ensemble_mape'].min():.2f}%)")
+        if comparison_data:
+            comparison_df = pd.DataFrame(comparison_data)
+            st.dataframe(comparison_df, use_container_width=True)
             
-            print(f"\nBest Performing Parts (Top 5):")
-            top_performers = valid_results.nsmallest(5, 'ensemble_mape')
-            for _, row in top_performers.iterrows():
-                print(f"  {row['part_code']}: {row['ensemble_mape']:.2f}% (best: {row['best_model']})")
-            
-            print(f"\nWorst Performing Parts (Bottom 5):")
-            worst_performers = valid_results.nlargest(5, 'ensemble_mape')
-            for _, row in worst_performers.iterrows():
-                print(f"  {row['part_code']}: {row['ensemble_mape']:.2f}% (best: {row['best_model']})")
-        else:
-            print("No parts had valid model predictions!")
+            # Show summary statistics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("📊 Total Actual Sales", f"{actual_total:,.0f}")
+            with col2:
+                ensemble_total = result_df['Ensemble_Forecast'].sum() if 'Ensemble_Forecast' in result_df.columns else 0
+                st.metric("🔥 Total Ensemble Forecast", f"{ensemble_total:,.0f}")
+            with col3:
+                if ensemble_total > 0 and actual_total > 0:
+                    ensemble_accuracy = 100 - (abs(ensemble_total - actual_total) / actual_total * 100)
+                    st.metric("🎯 Ensemble Accuracy", f"{ensemble_accuracy:.1f}%")
+    
+    else:
+        # Show forecast-only chart
+        st.warning("📊 No actual data available for comparison. Showing forecasts only.")
         
-        # Show parts with no valid models
-        failed_parts = results_df[results_df['model_count'] == 0]
-        if len(failed_parts) > 0:
-            print(f"\nParts with no valid models ({len(failed_parts)}):")
-            for part_code in failed_parts['part_code'].head(10):  # Show first 10
-                print(f"  {part_code}")
+        fig = go.Figure()
+        colors = ['#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD']
         
-        return results_df
+        for i, col in enumerate(model_cols):
+            model_name = col.replace('_Forecast', '')
+            fig.add_trace(go.Scatter(
+                x=result_df['Month'],
+                y=result_df[col],
+                mode='lines+markers',
+                name=f'📈 {model_name.upper()}',
+                line=dict(color=colors[i % len(colors)], width=2),
+                marker=dict(size=6)
+            ))
+        
+        if 'Ensemble_Forecast' in result_df.columns:
+            fig.add_trace(go.Scatter(
+                x=result_df['Month'],
+                y=result_df['Ensemble_Forecast'],
+                mode='lines+markers',
+                name='🔥 ENSEMBLE',
+                line=dict(color='#6C5CE7', width=3, dash='dash'),
+                marker=dict(size=8)
+            ))
+        
+        fig.update_layout(
+            title=f'📈 ALL MODELS FORECAST COMPARISON ({forecast_year})',
+            xaxis_title='Month',
+            yaxis_title='Sales Volume',
+            height=600,
+            hovermode='x unified'
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        st.info(f"📊 Upload {forecast_year} actual data to see model accuracy comparison!")
 
-# Streamlit Integration Functions
-def create_streamlit_app():
-    """Create a Streamlit app for the prediction system"""
-    import streamlit as st
+    # 10) ENHANCED EXCEL DOWNLOAD
+    st.subheader("📊 Enhanced Excel Report")
     
-    st.title("🔧 Improved Sales Prediction System")
-    st.markdown("Upload your sales data files to get started with improved predictions!")
+    # Create enhanced Excel report
+    @st.cache_data
+    def create_enhanced_excel_report(result_df, forecast_year):
+        output = io.BytesIO()
+        
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            # Sheet 1: Main Comparison
+            main_sheet = result_df.copy()
+            main_sheet['Month'] = main_sheet['Month'].dt.strftime('%Y-%m-%d')
+            main_sheet.to_excel(writer, sheet_name='Main_Comparison', index=False)
+            
+            # Sheet 2: Model vs Actual Analysis (only if actual data exists)
+            actual_col = f'Actual_{forecast_year}'
+            if actual_col in result_df.columns and result_df[actual_col].notna().any():
+                model_cols = [col for col in result_df.columns if '_Forecast' in col]
+                
+                analysis_data = []
+                for _, row in result_df.iterrows():
+                    base_data = {
+                        'Month': row['Month'].strftime('%Y-%m-%d'),
+                        'Actual': row[actual_col] if pd.notna(row[actual_col]) else 'N/A'
+                    }
+                    
+                    for col in model_cols:
+                        model_name = col.replace('_Forecast', '')
+                        forecast_val = row[col]
+                        base_data[f'{model_name}_Forecast'] = forecast_val
+                        
+                        if pd.notna(row[actual_col]) and pd.notna(forecast_val):
+                            variance = forecast_val - row[actual_col]
+                            abs_error = abs(variance)
+                            pct_error = (abs_error / row[actual_col]) * 100
+                            
+                            base_data[f'{model_name}_Variance'] = round(variance, 2)
+                            base_data[f'{model_name}_Abs_Error'] = round(abs_error, 2)
+                            base_data[f'{model_name}_Error_Pct'] = round(pct_error, 2)
+                        else:
+                            base_data[f'{model_name}_Variance'] = 'N/A'
+                            base_data[f'{model_name}_Abs_Error'] = 'N/A'
+                            base_data[f'{model_name}_Error_Pct'] = 'N/A'
+                    
+                    analysis_data.append(base_data)
+                
+                analysis_df = pd.DataFrame(analysis_data)
+                analysis_df.to_excel(writer, sheet_name='Detailed_Analysis', index=False)
+                
+                # Sheet 3: Model Performance Summary (only if actual data exists)
+                summary_data = []
+                actual_subset = result_df[result_df[actual_col].notna()]
+                
+                if len(actual_subset) > 0:
+                    actual_total = actual_subset[actual_col].sum()
+                    
+                    for col in model_cols:
+                        model_name = col.replace('_Forecast', '')
+                        
+                        # Calculate metrics only for months with actual data
+                        metrics = calculate_accuracy_metrics(actual_subset[actual_col], actual_subset[col])
+                        
+                        if metrics:
+                            total_forecast = result_df[col].sum()
+                            bias_pct = ((total_forecast - actual_total) / actual_total * 100) if actual_total > 0 else 0
+                            
+                            summary_data.append({
+                                'Model': model_name,
+                                'MAPE': round(metrics['MAPE'], 2),
+                                'MAE': round(metrics['MAE'], 0),
+                                'RMSE': round(metrics['RMSE'], 0),
+                                'Total_Forecast': round(total_forecast, 0),
+                                'Total_Actual': round(actual_total, 0),
+                                'Bias_Percent': round(bias_pct, 2),
+                                'Accuracy_Percent': round(100 - metrics['MAPE'], 1),
+                                'Months_With_Actual': len(actual_subset)
+                            })
+                    
+                    if summary_data:
+                        summary_df = pd.DataFrame(summary_data)
+                        summary_df = summary_df.sort_values('MAPE')  # Best to worst
+                        summary_df.to_excel(writer, sheet_name='Model_Performance', index=False)
+            
+            # Sheet 4: Forecast Summary (always included)
+            model_cols = [col for col in result_df.columns if '_Forecast' in col]
+            forecast_summary = []
+            
+            for col in model_cols:
+                model_name = col.replace('_Forecast', '')
+                total_forecast = result_df[col].sum()
+                avg_monthly = result_df[col].mean()
+                
+                forecast_summary.append({
+                    'Model': model_name,
+                    'Total_Annual_Forecast': round(total_forecast, 0),
+                    'Average_Monthly_Forecast': round(avg_monthly, 0),
+                    'Min_Monthly': round(result_df[col].min(), 0),
+                    'Max_Monthly': round(result_df[col].max(), 0)
+                })
+            
+            if forecast_summary:
+                forecast_df = pd.DataFrame(forecast_summary)
+                forecast_df.to_excel(writer, sheet_name='Forecast_Summary', index=False)
+        
+        output.seek(0)
+        return output
     
-    # Initialize session state
-    if 'predictor' not in st.session_state:
-        st.session_state['predictor'] = None
-    if 'df' not in st.session_state:
-        st.session_state['df'] = None
-    if 'models_trained' not in st.session_state:
-        st.session_state['models_trained'] = False
-    if 'performance' not in st.session_state:
-        st.session_state['performance'] = None
-    
-    # File uploaders
-    st.header("📁 Upload Data Files")
+    # Generate and offer download
+    excel_data = create_enhanced_excel_report(result_df, forecast_year)
     
     col1, col2 = st.columns(2)
     
     with col1:
-        sales_2024_file = st.file_uploader(
-            "Upload 2024 Sales Data", 
-            type=['xlsx', 'xls'],
-            help="Upload your SPC Sales per part 2024.xlsx file"
+        st.download_button(
+            label="📊 Download Enhanced Excel Report",
+            data=excel_data,
+            file_name=f"sales_forecast_analysis_{forecast_year}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     
     with col2:
-        sales_hist_file = st.file_uploader(
-            "Upload 2022-2023 Historical Data", 
-            type=['xlsx', 'xls'],
-            help="Upload your SPC_Sales_2022_2023_Formatted.xlsx file"
+        # CSV download
+        csv = result_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="📄 Download CSV Report",
+            data=csv,
+            file_name=f"forecasts_vs_actual_{forecast_year}.csv",
+            mime="text/csv",
         )
     
-    if sales_2024_file and sales_hist_file:
-        try:
-            # Initialize predictor if not already done
-            if st.session_state['predictor'] is None:
-                st.session_state['predictor'] = ImprovedSalesPredictionSystem()
-            
-            predictor = st.session_state['predictor']
-            
-            # Load data with progress bar (only if not already loaded)
-            if st.session_state['df'] is None:
-                with st.spinner("Loading and preparing data..."):
-                    df = predictor.load_and_prepare_data(sales_2024_file, sales_hist_file)
-                    st.session_state['df'] = df
-            else:
-                df = st.session_state['df']
-            
-            st.success(f"✅ Data loaded successfully!")
-            st.info(f"📊 Loaded {len(df)} records for {df['part_code'].nunique()} parts")
-            st.info(f"📅 Date range: {df['date'].min().strftime('%Y-%m')} to {df['date'].max().strftime('%Y-%m')}")
-            
-            # Show data preview
-            if st.checkbox("Show data preview"):
-                st.subheader("Data Preview")
-                st.dataframe(df.head(10))
-                
-                # Basic statistics
-                st.subheader("Basic Statistics")
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Total Parts", df['part_code'].nunique())
-                with col2:
-                    st.metric("Total Records", len(df))
-                with col3:
-                    st.metric("Avg Monthly Sales", f"{df['sales'].mean():.0f}")
-                with col4:
-                    st.metric("Date Range (Months)", df['date'].nunique())
-            
-            # Training section
-            st.header("🎯 Train Prediction Models")
-            
-            if not st.session_state['models_trained']:
-                if st.button("🚀 Start Training", type="primary"):
-                    with st.spinner("Training models... This may take a few minutes."):
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
-                        
-                        # Engineer features
-                        progress_bar.progress(20)
-                        status_text.text("Engineering features...")
-                        df_features = predictor.engineer_features(df)
-                        
-                        # Train models
-                        progress_bar.progress(40)
-                        status_text.text("Training models for each part...")
-                        results = predictor.train_system(df)
-                        
-                        progress_bar.progress(80)
-                        status_text.text("Evaluating performance...")
-                        performance = predictor.evaluate_system_performance(df)
-                        
-                        # Store results in session state
-                        st.session_state['performance'] = performance
-                        st.session_state['models_trained'] = True
-                        
-                        progress_bar.progress(100)
-                        status_text.text("Training completed!")
-                        st.success("✅ Training completed!")
-                        st.rerun()  # Refresh to show results
-            else:
-                st.success("✅ Models already trained!")
-                performance = st.session_state['performance']
-                
-                # Display results
-                st.header("📈 Model Performance")
-                
-                if performance is not None and len(performance) > 0:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.metric(
-                            "Average MAPE", 
-                            f"{performance['ensemble_mape'].mean():.2f}%",
-                            delta=f"-{abs(25 - performance['ensemble_mape'].mean()):.1f}% vs baseline"
-                        )
-                    
-                    with col2:
-                        st.metric(
-                            "Parts Successfully Modeled", 
-                            f"{len(performance)}/{df['part_code'].nunique()}",
-                            delta=f"{len(performance)/df['part_code'].nunique()*100:.0f}% coverage"
-                        )
-                    
-                    # Performance details
-                    st.subheader("Best Performing Parts")
-                    top_performers = performance.nsmallest(5, 'ensemble_mape')
-                    st.dataframe(top_performers[['part_code', 'ensemble_mape', 'best_model']])
-                    
-                    st.subheader("Parts Needing Attention")
-                    bottom_performers = performance.nlargest(5, 'ensemble_mape')
-                    st.dataframe(bottom_performers[['part_code', 'ensemble_mape', 'best_model']])
-                
-                # Predictions section
-                st.header("🔮 Generate Predictions")
-                
-                # Check if we have trained models
-                if hasattr(predictor, 'models') and len(predictor.models) > 0:
-                    st.info(f"Ready to generate predictions for {len(predictor.models)} parts")
-                    
-                    if st.button("Generate Next Month Predictions", type="primary"):
-                        with st.spinner("Generating predictions..."):
-                            predictions = []
-                            prediction_progress = st.progress(0)
-                            
-                            model_parts = list(predictor.models.keys())
-                            total_parts = len(model_parts)
-                            
-                            for i, part_code in enumerate(model_parts):
-                                try:
-                                    pred = predictor.predict_next_month(df, part_code)
-                                    if pred and pred['predicted_sales'] is not None:
-                                        predictions.append(pred)
-                                except Exception as e:
-                                    st.warning(f"Failed to predict for part {part_code}: {str(e)}")
-                                
-                                # Update progress
-                                prediction_progress.progress((i + 1) / total_parts)
-                        
-                        if predictions:
-                            pred_df = pd.DataFrame(predictions)
-                            
-                            st.subheader("Prediction Results")
-                            st.success(f"✅ Generated predictions for {len(predictions)} parts!")
-                            
-                            # Summary metrics
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.metric("Total Predicted Sales", f"{pred_df['predicted_sales'].sum():.0f}")
-                            with col2:
-                                st.metric("Average per Part", f"{pred_df['predicted_sales'].mean():.0f}")
-                            with col3:
-                                st.metric("Highest Prediction", f"{pred_df['predicted_sales'].max():.0f}")
-                            
-                            # Top predictions
-                            st.subheader("Top 10 Predicted Sales")
-                            top_predictions = pred_df.nlargest(10, 'predicted_sales')
-                            st.dataframe(top_predictions[['part_code', 'predicted_sales', 'models_used']])
-                            
-                            # All predictions table
-                            with st.expander("View All Predictions"):
-                                st.dataframe(pred_df.sort_values('predicted_sales', ascending=False))
-                            
-                            # Download predictions
-                            csv = pred_df.to_csv(index=False)
-                            st.download_button(
-                                label="📥 Download Predictions as CSV",
-                                data=csv,
-                                file_name=f"sales_predictions_{datetime.now().strftime('%Y%m%d')}.csv",
-                                mime="text/csv"
-                            )
-                            
-                            # Store predictions in session state
-                            st.session_state['predictions'] = predictions
-                        
-                        else:
-                            st.error("❌ No predictions generated. Please check your data and try again.")
-                
-                else:
-                    st.warning("⚠️ No trained models available. Please train the models first.")
-                    st.session_state['models_trained'] = False
-                
-        except Exception as e:
-            st.error(f"❌ Error processing files: {str(e)}")
-            st.error("Please check your file formats and try again.")
-            
-            with st.expander("Error Details"):
-                st.code(str(e))
-                import traceback
-                st.code(traceback.format_exc())
-    
-    else:
-        st.info("👆 Please upload both data files to continue")
-        
-        # Show sample file format
-        with st.expander("Expected File Formats"):
-            st.markdown("""
-            **2024 Sales File should contain:**
-            - Part codes in first column
-            - Monthly sales data in subsequent columns
-            - Headers like: Part Code, Description, Brand, Engine, Jan-2024, Feb-2024, etc.
-            
-            **Historical File should contain:**
-            - Part codes, dates/months, and sales values
-            - Headers like: Part, Month, Sales
-            """)
-    
-    # Add a reset button in the sidebar
-    with st.sidebar:
-        st.header("🔄 Controls")
-        if st.button("Reset Application"):
-            # Clear all session state
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
-            st.rerun()
-        
-        if st.session_state.get('models_trained', False):
-            st.success("✅ Models trained")
-            st.info(f"📊 {len(st.session_state.get('predictor', {}).models) if st.session_state.get('predictor') else 0} parts modeled")
-        
-        # Show memory usage info
-        if st.session_state.get('df') is not None:
-            df_size = st.session_state['df'].memory_usage(deep=True).sum() / 1024 / 1024
-            st.info(f"💾 Data size: {df_size:.1f} MB")
-# Usage Example
-def main():
-    """Main execution function"""
-    
-    # Check if running in Streamlit
-    try:
-        import streamlit as st
-        # If we can import streamlit and we're in a streamlit context
-        if hasattr(st, 'session_state'):
-            create_streamlit_app()
-            return
-    except ImportError:
-        pass
-    
-    # Traditional execution for non-Streamlit environments
-    predictor = ImprovedSalesPredictionSystem()
-    
-    # Load and prepare data
-    print("Loading data...")
-    df = predictor.load_and_prepare_data('SPC Sales per part 2024.xlsx', 'SPC_Sales_2022_2023_Formatted.xlsx')
-    
-    # Train the system
-    results = predictor.train_system(df)
-    
-    # Evaluate performance
-    performance = predictor.evaluate_system_performance(df)
-    
-    # Make predictions for all parts
-    print("\nMaking predictions for next month...")
-    predictions = []
-    
-    for part_code in predictor.models.keys():
-        pred = predictor.predict_next_month(df, part_code)
-        if pred:
-            predictions.append(pred)
-    
-    # Display predictions
-    pred_df = pd.DataFrame(predictions)
-    print("\nTop 10 Predicted Sales for Next Month:")
-    print(pred_df.nlargest(10, 'predicted_sales')[['part_code', 'predicted_sales']])
-    
-    return predictor, df, performance, predictions
+    # Show what's in the Excel file
+    st.info("""
+    **📊 Excel Report Contains:**
+    - **Main_Comparison**: All forecasts and actual data
+    - **Detailed_Analysis**: Each model vs actual with variance, errors, and percentages
+    - **Model_Performance**: Summary with MAPE, MAE, RMSE, bias, and accuracy rankings
+    """)
+
 
 if __name__ == "__main__":
     main()
