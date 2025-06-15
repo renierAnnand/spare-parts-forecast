@@ -1,478 +1,4 @@
-else:
-                        st.warning(f"⚠️ {model_name} returned invalid format. Using fallback.")
-                        fallback_forecast = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor, adjustment_factor=current_adjustment_factor)
-                        fallback_forecast = apply_forecast_adjustment(fallback_forecast, current_adjustment_factor)
-                        forecast_results[f"{model_name}_Forecast"] = fallback_forecast
-                        validation_scores[model_name] = np.inf
-                    
-                except Exception as e:
-                    st.error(f"❌ Advanced {model_name} failed: {str(e)}")
-                    fallback_forecast = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor, adjustment_factor=current_adjustment_factor)
-                    fallback_forecast = apply_forecast_adjustment(fallback_forecast, current_adjustment_factor)
-                    forecast_results[f"{model_name}_Forecast"] = fallback_forecast
-                    validation_scores[model_name] = np.inf
-
-            progress_bar.progress((i + 1) / len(models_to_run))
-
-        # Validate that we have at least one successful forecast
-        if not forecast_results:
-            st.error("❌ All models failed. Please check your data and try again.")
-            return
-
-        # Create advanced ensemble
-        if len(forecast_results) > 1:
-            with st.spinner("🔥 Creating intelligent weighted ensemble..."):
-                try:
-                    ensemble_values, ensemble_weights = create_weighted_ensemble(forecast_results, validation_scores, current_adjustment_factor)
-                    forecast_results["Weighted_Ensemble"] = ensemble_values
-                    
-                    # Show ensemble weights
-                    st.info(f"🎯 Ensemble weights: {', '.join([f'{k}: {v:.1%}' for k, v in ensemble_weights.items()])}")
-                except Exception as e:
-                    st.warning(f"⚠️ Ensemble creation failed: {str(e)}")
-        
-        # Meta-learning ensemble
-        if enable_meta_learning and actual_2024_df is not None:
-            with st.spinner("🧠 Training meta-learning model..."):
-                try:
-                    meta_forecast = run_meta_learning_forecast(forecast_results, actual_2024_df, forecast_periods=12, adjustment_factor=current_adjustment_factor)
-                    if meta_forecast is not None:
-                        forecast_results["Meta_Learning"] = meta_forecast
-                        st.success("✅ Meta-learning ensemble created successfully")
-                except Exception as e:
-                    st.warning(f"⚠️ Meta-learning failed: {str(e)}")
-
-        # Create results dataframe
-        result_df = pd.DataFrame({
-            "Month": forecast_dates,
-            **forecast_results
-        })
-
-        # Merge actual data if available
-        if actual_2024_df is not None:
-            actual_2024_df['Month'] = pd.to_datetime(actual_2024_df['Month'])
-            result_df['Month'] = pd.to_datetime(result_df['Month'])
-            result_df = result_df.merge(actual_2024_df, on="Month", how="left")
-            
-            actual_count = result_df[f'Actual_{forecast_year}'].notna().sum()
-            st.success(f"📊 Loaded {actual_count} months of actual data for validation")
-
-        # Display results
-        st.subheader("📊 Advanced Forecast Results")
-        
-        # Show adjustment impact
-        if adjustment_percentage < 0:
-            st.info(f"📉 **Adjustment Applied**: All forecast values shown below have been reduced by {abs(adjustment_percentage):.1f}%")
-        elif adjustment_percentage > 0:
-            st.info(f"📈 **Adjustment Applied**: All forecast values shown below have been increased by {adjustment_percentage:.1f}%")
-        else:
-            st.info("⚖️ **No Adjustment Applied**: Forecast values show original predictions")
-        
-        # Debug information - show forecast summaries
-        if forecast_results:
-            st.subheader("🔍 Forecast Summary")
-            debug_data = []
-            for model_name, forecast_values in forecast_results.items():
-                if isinstance(forecast_values, (list, np.ndarray)):
-                    forecast_array = np.array(forecast_values)
-                    debug_data.append({
-                        'Model': model_name.replace('_Forecast', '').replace('_', ' '),
-                        'Min Value': f"{np.min(forecast_array):,.0f}",
-                        'Max Value': f"{np.max(forecast_array):,.0f}",
-                        'Mean Value': f"{np.mean(forecast_array):,.0f}",
-                        'Total Annual': f"{np.sum(forecast_array):,.0f}",
-                        'Values Valid': "✅" if len(forecast_array) == 12 and not np.all(forecast_array == 0) else "❌",
-                        'Adjustment Applied': f"{adjustment_percentage:+.1f}%"
-                    })
-            
-            if debug_data:
-                debug_df = pd.DataFrame(debug_data)
-                st.dataframe(debug_df, use_container_width=True)
-
-        # Show forecast table with enhanced formatting
-        display_df = result_df.copy()
-        display_df['Month'] = display_df['Month'].dt.strftime('%Y-%m')
-        
-        for col in display_df.columns:
-            if col != 'Month':
-                display_df[col] = display_df[col].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "N/A")
-        
-        st.dataframe(display_df, use_container_width=True)
-
-        # ADVANCED COMPARISON CHART
-        st.subheader("📊 Advanced Model Performance Comparison")
-
-        model_cols = [col for col in result_df.columns if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']]
-        actual_col = f'Actual_{forecast_year}'
-
-        has_actual_data = actual_col in result_df.columns and result_df[actual_col].notna().any()
-
-        if has_actual_data:
-            # Get only months with actual data
-            actual_data = result_df[result_df[actual_col].notna()].copy()
-            
-            # Show info about available data coverage
-            available_months = actual_data['Month'].dt.strftime('%b %Y').tolist()
-            st.info(f"📅 **Available actual data for {len(available_months)} months:** {', '.join(available_months)}")
-            
-            # Create improved comparison chart
-            fig = create_comparison_chart_for_available_months_only(result_df, forecast_year, adjustment_percentage)
-            
-            if fig:
-                st.plotly_chart(fig, use_container_width=True)
-            
-            # Advanced performance metrics - only for available months
-            st.subheader("🎯 Advanced Performance Analysis")
-            st.caption(f"Performance calculated only for months with actual data ({len(actual_data)} months)")
-            
-            if adjustment_percentage != 0:
-                adj_text = f"reduced by {abs(adjustment_percentage):.1f}%" if adjustment_percentage < 0 else f"increased by {adjustment_percentage:.1f}%"
-                st.warning(f"⚠️ **Note**: Forecasts have been {adj_text}, which may affect accuracy metrics when compared to original actual values.")
-            
-            performance_data = []
-            actual_total = actual_data[actual_col].sum()
-            
-            for col in model_cols:
-                model_name = col.replace('_Forecast', '').replace('_', ' ')
-                
-                # Calculate forecast total only for months with actual data
-                forecast_total = actual_data[col].sum()
-                
-                # Calculate metrics only for available months
-                metrics = calculate_accuracy_metrics(actual_data[actual_col], actual_data[col])
-                if metrics:
-                    bias = ((forecast_total - actual_total) / actual_total * 100) if actual_total > 0 else 0
-                    
-                    # Get validation score if available
-                    val_score = validation_scores.get(model_name.replace(' ', ''), 'N/A')
-                    val_score_text = f"{val_score:.2f}" if val_score != np.inf and val_score != 'N/A' else 'N/A'
-                    
-                    performance_data.append({
-                        'Model': model_name,
-                        'MAPE (%)': f"{metrics['MAPE']:.1f}%",
-                        'SMAPE (%)': f"{metrics['SMAPE']:.1f}%",
-                        'MAE': f"{metrics['MAE']:,.0f}",
-                        'RMSE': f"{metrics['RMSE']:,.0f}",
-                        'MASE': f"{metrics['MASE']:.2f}",
-                        'Total Forecast (Available Months)': f"{forecast_total:,.0f}",
-                        'Total Actual (Available Months)': f"{actual_total:,.0f}",
-                        'Bias (%)': f"{bias:+.1f}%",
-                        'Validation Score': val_score_text,
-                        'Accuracy': f"{100 - metrics['MAPE']:.1f}%",
-                        'Data Coverage': f"{len(actual_data)}/12 months",
-                        'Adjustment Applied': f"{adjustment_percentage:+.1f}%"
-                    })
-            
-            if performance_data:
-                performance_df = pd.DataFrame(performance_data)
-                st.dataframe(performance_df, use_container_width=True)
-                
-                # Show best performing model
-                best_model = performance_df.loc[performance_df['MAPE (%)'].str.replace('%', '').astype(float).idxmin()]
-                st.success(f"🏆 Best performing model: **{best_model['Model']}** with {best_model['MAPE (%)']} MAPE")
-                
-                # Show data coverage info
-                coverage_pct = len(actual_data) / 12 * 100
-                if coverage_pct < 100:
-                    st.warning(f"⚠️ Performance analysis based on {len(actual_data)} months of actual data ({coverage_pct:.0f}% coverage)")
-
-        else:
-            # Forecast-only view
-            st.warning("📊 No actual data for validation. Showing advanced forecasts.")
-            
-            fig = go.Figure()
-            colors = ['#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#FF9F43', '#6C5CE7']
-            
-            for i, col in enumerate(model_cols):
-                if col in ['Weighted_Ensemble', 'Meta_Learning']:
-                    line_style = dict(color='#6C5CE7', width=3, dash='dash') if col == 'Weighted_Ensemble' else dict(color='#00D2D3', width=3, dash='dot')
-                    icon = '🔥' if col == 'Weighted_Ensemble' else '🧠'
-                else:
-                    line_style = dict(color=colors[i % len(colors)], width=2)
-                    icon = '📈'
-                
-                model_name = col.replace('_Forecast', '').replace('_', ' ').upper()
-                fig.add_trace(go.Scatter(
-                    x=result_df['Month'],
-                    y=result_df[col],
-                    mode='lines+markers',
-                    name=f'{icon} {model_name}',
-                    line=line_style,
-                    marker=dict(size=6)
-                ))
-            
-            # Create dynamic title based on adjustment
-            if adjustment_percentage < 0:
-                adj_text = f"{abs(adjustment_percentage):.1f}% Reduction Applied"
-            elif adjustment_percentage > 0:
-                adj_text = f"{adjustment_percentage:.1f}% Increase Applied"
-            else:
-                adj_text = "No Adjustment Applied"
-            
-            fig.update_layout(
-                title=f'🚀 ADVANCED AI FORECAST MODELS COMPARISON ({adj_text})',
-                xaxis_title='Month',
-                yaxis_title='Sales Volume',
-                height=700,
-                hovermode='x unified'
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-
-        # ADVANCED EXCEL DOWNLOAD
-        st.subheader("📊 Advanced Analytics Export")
-        
-        @st.cache_data
-        def create_advanced_excel_report(result_df, hist_df, forecast_year, scaling_factor, validation_scores, ensemble_weights=None, adjustment_factor=None):
-            output = io.BytesIO()
-            
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                # Sheet 1: Main Results
-                main_sheet = result_df.copy()
-                main_sheet['Month'] = main_sheet['Month'].dt.strftime('%Y-%m-%d')
-                main_sheet.to_excel(writer, sheet_name='Advanced_Results', index=False)
-                
-                # Sheet 2: Model Performance Metrics
-                actual_col = f'Actual_{forecast_year}'
-                if actual_col in result_df.columns and result_df[actual_col].notna().any():
-                    model_cols = [col for col in result_df.columns if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']]
-                    actual_subset = result_df[result_df[actual_col].notna()]
-                    
-                    perf_data = []
-                    for col in model_cols:
-                        model_name = col.replace('_Forecast', '').replace('_', ' ')
-                        metrics = calculate_accuracy_metrics(actual_subset[actual_col], actual_subset[col])
-                        
-                        if metrics:
-                            val_score = validation_scores.get(model_name.replace(' ', ''), np.inf)
-                            perf_data.append({
-                                'Model': model_name,
-                                'MAPE': round(metrics['MAPE'], 2),
-                                'SMAPE': round(metrics['SMAPE'], 2),
-                                'MAE': round(metrics['MAE'], 0),
-                                'RMSE': round(metrics['RMSE'], 0),
-                                'MASE': round(metrics['MASE'], 3),
-                                'Validation_Score': round(val_score, 2) if val_score != np.inf else 'N/A',
-                                'Total_Forecast': round(result_df[col].sum(), 0),
-                                'Scaling_Applied': f"{scaling_factor:.2f}x",
-                                'Adjustment_Applied': f"{((adjustment_factor-1)*100):+.1f}%" if adjustment_factor else "N/A",
-                                'Adjustment_Factor': adjustment_factor if adjustment_factor else "N/A"
-                            })
-                    
-                    if perf_data:
-                        perf_df = pd.DataFrame(perf_data)
-                        perf_df.to_excel(writer, sheet_name='Advanced_Performance', index=False)
-                
-                # Sheet 3: Ensemble Analysis
-                if ensemble_weights:
-                    ensemble_data = pd.DataFrame([
-                        {'Model': k, 'Weight': f"{v:.1%}", 'Weight_Numeric': v} 
-                        for k, v in ensemble_weights.items()
-                    ])
-                    ensemble_data.to_excel(writer, sheet_name='Ensemble_Weights', index=False)
-                
-                # Sheet 4: Advanced Data Analysis
-                data_analysis = []
-                
-                # Seasonality analysis
-                monthly_data = hist_df.groupby('Month')['Sales'].sum().reset_index()
-                if len(monthly_data) >= 24 and STATSMODELS_AVAILABLE:
-                    try:
-                        decomposition = seasonal_decompose(monthly_data['Sales'], model='additive', period=12)
-                        seasonal_strength = np.var(decomposition.seasonal) / np.var(monthly_data['Sales'])
-                        data_analysis.append({'Metric': 'Seasonality_Strength', 'Value': seasonal_strength})
-                    except:
-                        pass
-                
-                # Trend analysis
-                if len(monthly_data) >= 12:
-                    try:
-                        recent_trend = np.polyfit(range(len(monthly_data['Sales'].tail(12))), monthly_data['Sales'].tail(12), 1)[0]
-                        data_analysis.append({'Metric': 'Recent_Trend_Slope', 'Value': recent_trend})
-                    except:
-                        pass
-                
-                # Data quality metrics
-                unique_months = hist_df['Month'].nunique()
-                data_analysis.extend([
-                    {'Metric': 'Unique_Months', 'Value': unique_months},
-                    {'Metric': 'Total_Data_Points', 'Value': len(hist_df)},
-                    {'Metric': 'Data_Quality_Score', 'Value': min(100, unique_months * 4.17)},
-                    {'Metric': 'Scaling_Factor', 'Value': scaling_factor},
-                    {'Metric': 'Log_Transformed', 'Value': hist_df.get('log_transformed', [False])[0] if len(hist_df) > 0 else False},
-                    {'Metric': 'Adjustment_Factor_Applied', 'Value': adjustment_factor if adjustment_factor else "N/A"},
-                    {'Metric': 'Adjustment_Percentage', 'Value': f"{((adjustment_factor-1)*100):+.1f}%" if adjustment_factor else "N/A"}
-                ])
-                
-                if data_analysis:
-                    analysis_df = pd.DataFrame(data_analysis)
-                    analysis_df.to_excel(writer, sheet_name='Data_Analysis', index=False)
-                
-                # Sheet 5: Feature Importance (if XGBoost was used)
-                if 'XGBoost_Forecast' in result_df.columns:
-                    feature_importance = pd.DataFrame({
-                        'Feature': ['lag_1', 'rolling_mean_12', 'month_sin', 'trend_12', 'seasonal_ratio'],
-                        'Importance': [0.25, 0.20, 0.15, 0.10, 0.08],
-                        'Description': [
-                            'Previous month sales',
-                            '12-month rolling average',
-                            'Monthly seasonality (sin)',
-                            '12-month trend',
-                            'Seasonal ratio'
-                        ]
-                    })
-                    feature_importance.to_excel(writer, sheet_name='Feature_Importance', index=False)
-                
-                # Sheet 6: Adjustment Impact Analysis
-                if actual_col in result_df.columns and result_df[actual_col].notna().any() and adjustment_factor:
-                    model_cols = [col for col in result_df.columns if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']]
-                    
-                    adjustment_impact = []
-                    for col in model_cols:
-                        model_name = col.replace('_Forecast', '').replace('_', ' ')
-                        adjusted_total = result_df[col].sum()
-                        original_total = adjusted_total / adjustment_factor
-                        adjustment_amount = adjusted_total - original_total
-                        
-                        adjustment_impact.append({
-                            'Model': model_name,
-                            'Original_Forecast_Total': round(original_total, 0),
-                            'Adjusted_Forecast_Total': round(adjusted_total, 0),
-                            'Adjustment_Amount': round(adjustment_amount, 0),
-                            'Adjustment_Percentage': f"{((adjustment_factor-1)*100):+.1f}%",
-                            'Adjustment_Factor': adjustment_factor
-                        })
-                    
-                    if adjustment_impact:
-                        adjustment_df = pd.DataFrame(adjustment_impact)
-                        adjustment_df.to_excel(writer, sheet_name='Adjustment_Impact', index=False)
-            
-            output.seek(0)
-            return output
-        
-        # Generate advanced report
-        excel_data = create_advanced_excel_report(
-            result_df, hist_df, forecast_year, scaling_factor, 
-            validation_scores, ensemble_weights if 'Weighted_Ensemble' in result_df.columns else None, current_adjustment_factor
-        )
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            adj_text = f"adj_{adjustment_percentage:+.1f}pct" if adjustment_percentage != 0 else "no_adj"
-            st.download_button(
-                label="🚀 Download Advanced Analytics Report",
-                data=excel_data,
-                file_name=f"advanced_ai_forecast_report_{forecast_year}_{adj_text}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        
-        with col2:
-            csv = result_df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="📄 Download CSV Data",
-                data=csv,
-                file_name=f"advanced_forecasts_{forecast_year}_{adj_text}.csv",
-                mime="text/csv"
-            )
-        
-        # Show what's included
-        adj_desc = f"adjusted by {adjustment_percentage:+.1f}%" if adjustment_percentage != 0 else "no adjustment applied"
-        st.info(f"""
-        **🚀 Advanced Analytics Report Contains:**
-        - **Advanced_Results**: All forecasts with intelligent weighting ({adj_desc})
-        - **Advanced_Performance**: Enhanced metrics (MAPE, SMAPE, MASE, validation scores)  
-        - **Ensemble_Weights**: Intelligent weighting based on validation performance
-        - **Data_Analysis**: Seasonality, trend, and quality analysis
-        - **Feature_Importance**: ML model feature rankings (if applicable)
-        - **Adjustment_Impact**: Analysis of adjustment impact on forecasts
-        """)
-
-        # Final advanced summary
-        st.subheader("🎯 Advanced Forecast Intelligence Summary")
-        
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            if 'Weighted_Ensemble' in result_df.columns:
-                ensemble_total = result_df['Weighted_Ensemble'].sum()
-                original_ensemble_total = ensemble_total / current_adjustment_factor
-                st.metric("🔥 Intelligent Ensemble", f"{ensemble_total:,.0f}", 
-                         delta=f"Original: {original_ensemble_total:,.0f}")
-        
-        with col2:
-            if 'Meta_Learning' in result_df.columns:
-                meta_total = result_df['Meta_Learning'].sum()
-                original_meta_total = meta_total / current_adjustment_factor
-                st.metric("🧠 Meta-Learning", f"{meta_total:,.0f}",
-                         delta=f"Original: {original_meta_total:,.0f}")
-        
-        with col3:
-            successful_models = len([v for v in validation_scores.values() if v != np.inf])
-            total_models = len(validation_scores)
-            st.metric("🤖 Models Successful", f"{successful_models}/{total_models}")
-        
-        with col4:
-            combined_factor = scaling_factor * current_adjustment_factor
-            st.metric("📊 Combined Adjustment", f"{combined_factor:.2f}x",
-                     delta=f"Scale: {scaling_factor:.2f}x, Adjust: {current_adjustment_factor:.2f}x")
-
-        # Summary of adjustments applied
-        st.subheader("📋 Forecast Adjustments Summary")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            if adjustment_percentage < 0:
-                st.error(f"""
-                **📉 Reduction Applied**
-                - Reduction: {abs(adjustment_percentage):.1f}%
-                - Factor: {current_adjustment_factor:.3f}x
-                - Applied to: All forecasts
-                """)
-            elif adjustment_percentage > 0:
-                st.success(f"""
-                **📈 Increase Applied**
-                - Increase: {adjustment_percentage:.1f}%
-                - Factor: {current_adjustment_factor:.3f}x
-                - Applied to: All forecasts
-                """)
-            else:
-                st.info(f"""
-                **⚖️ No Adjustment**
-                - Change: 0%
-                - Factor: {current_adjustment_factor:.3f}x
-                - Applied to: All forecasts
-                """)
-        
-        with col2:
-            if scaling_factor != 1.0:
-                st.info(f"""
-                **📊 Scaling Applied**
-                - Scale factor: {scaling_factor:.2f}x
-                - Reason: Data scale mismatch detected
-                - Applied before adjustment
-                """)
-            else:
-                st.info(f"""
-                **📊 Scaling Applied**
-                - Scale factor: 1.0x (None)
-                - Reason: No scale mismatch detected
-                """)
-        
-        with col3:
-            total_adjustment = scaling_factor * current_adjustment_factor
-            net_effect = ((total_adjustment - 1) * 100)
-            st.info(f"""
-            **🔄 Total Effect**
-            - Combined factor: {total_adjustment:.3f}x
-            - Order: Scale → Adjust
-            - Net effect: {net_effect:+.1f}%
-            """)
-
-
-if __name__ == "__main__":
-    main()import streamlit as st
+import streamlit as st
 
 # Configure streamlit FIRST - must be before any other st commands
 st.set_page_config(page_title="Advanced Sales Forecasting Dashboard", layout="wide")
@@ -516,8 +42,8 @@ from sklearn.base import BaseEstimator, RegressorMixin
 import warnings
 warnings.filterwarnings("ignore")
 
-# ADDED: Global variable for the reduction factor
-FORECAST_REDUCTION_FACTOR = 0.85  # 85% = 100% - 15% reduction
+# Global variable for the default adjustment factor
+FORECAST_ADJUSTMENT_FACTOR = 0.85  # 85% = 100% - 15% reduction
 
 
 def apply_forecast_adjustment(forecast_values, adjustment_factor=None):
@@ -532,7 +58,7 @@ def apply_forecast_adjustment(forecast_values, adjustment_factor=None):
         Adjusted forecast values
     """
     if adjustment_factor is None:
-        adjustment_factor = FORECAST_REDUCTION_FACTOR
+        adjustment_factor = FORECAST_ADJUSTMENT_FACTOR
         
     if isinstance(forecast_values, (list, np.ndarray)):
         adjusted_values = np.array(forecast_values) * adjustment_factor
@@ -840,8 +366,8 @@ def run_advanced_sarima_forecast(data, forecast_periods=12, scaling_factor=1.0, 
         # Ensure we have enough data points
         if len(data) < 24:
             st.warning("⚠️ SARIMA needs at least 24 data points. Using fallback method.")
-            forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, reduction_factor)
-            return apply_forecast_reduction(forecast_values, reduction_factor), np.inf
+            forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, adjustment_factor)
+            return apply_forecast_adjustment(forecast_values, adjustment_factor), np.inf
         
         # Create a copy to avoid modifying original data
         work_data = data.copy()
@@ -925,8 +451,8 @@ def run_advanced_prophet_forecast(data, forecast_periods=12, scaling_factor=1.0,
     """Enhanced Prophet with better error handling"""
     try:
         if not PROPHET_AVAILABLE:
-            forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, reduction_factor)
-            return apply_forecast_reduction(forecast_values, reduction_factor), np.inf
+            forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, adjustment_factor)
+            return apply_forecast_adjustment(forecast_values, adjustment_factor), np.inf
         
         # Create a copy to avoid modifying original data
         work_data = data.copy()
@@ -970,21 +496,21 @@ def run_advanced_prophet_forecast(data, forecast_periods=12, scaling_factor=1.0,
         # Apply scaling and ensure positive values
         forecast_values = np.maximum(forecast_values, 0) * scaling_factor
         
-        # Apply reduction
-        return apply_forecast_reduction(forecast_values, reduction_factor), np.mean(np.abs(forecast['yhat'] - prophet_data['y']))
+        # Apply adjustment
+        return apply_forecast_adjustment(forecast_values, adjustment_factor), np.mean(np.abs(forecast['yhat'] - prophet_data['y']))
         
     except Exception as e:
         st.warning(f"⚠️ Advanced Prophet failed: {str(e)}. Using fallback method.")
-        forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, reduction_factor)
-        return apply_forecast_reduction(forecast_values, reduction_factor), np.inf
+        forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, adjustment_factor)
+        return apply_forecast_adjustment(forecast_values, adjustment_factor), np.inf
 
 
-def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0, reduction_factor=None):
+def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0, adjustment_factor=None):
     """Advanced ETS with better error handling"""
     try:
         if not STATSMODELS_AVAILABLE:
-            forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, reduction_factor)
-            return apply_forecast_reduction(forecast_values, reduction_factor), np.inf
+            forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, adjustment_factor)
+            return apply_forecast_adjustment(forecast_values, adjustment_factor), np.inf
         
         # Create a copy to avoid modifying original data
         work_data = data.copy()
@@ -1028,16 +554,16 @@ def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0, red
         # Apply scaling and ensure positive values
         forecast_values = np.maximum(forecast_values, 0) * scaling_factor
         
-        # Apply reduction
-        return apply_forecast_reduction(forecast_values, reduction_factor), fitted_model.aic
+        # Apply adjustment
+        return apply_forecast_adjustment(forecast_values, adjustment_factor), fitted_model.aic
         
     except Exception as e:
         st.warning(f"⚠️ Advanced ETS failed: {str(e)}. Using fallback method.")
-        forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, reduction_factor)
-        return apply_forecast_reduction(forecast_values, reduction_factor), np.inf
+        forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, adjustment_factor)
+        return apply_forecast_adjustment(forecast_values, adjustment_factor), np.inf
 
 
-def run_advanced_xgb_forecast(data, forecast_periods=12, scaling_factor=1.0, reduction_factor=None):
+def run_advanced_xgb_forecast(data, forecast_periods=12, scaling_factor=1.0, adjustment_factor=None):
     """Simplified XGBoost forecast with better error handling"""
     try:
         # Create a copy to avoid modifying original data
@@ -1080,16 +606,16 @@ def run_advanced_xgb_forecast(data, forecast_periods=12, scaling_factor=1.0, red
         # Apply scaling and ensure positive values
         forecasts = np.maximum(forecasts, 0) * scaling_factor
         
-        # Apply reduction
-        return apply_forecast_reduction(forecasts, reduction_factor), 200.0
+        # Apply adjustment
+        return apply_forecast_adjustment(forecasts, adjustment_factor), 200.0
         
     except Exception as e:
         st.warning(f"⚠️ Advanced XGBoost failed: {str(e)}. Using fallback method.")
-        forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, reduction_factor)
-        return apply_forecast_reduction(forecast_values, reduction_factor), np.inf
+        forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, adjustment_factor)
+        return apply_forecast_adjustment(forecast_values, adjustment_factor), np.inf
 
 
-def run_fallback_forecast(data, forecast_periods=12, scaling_factor=1.0, reduction_factor=None):
+def run_fallback_forecast(data, forecast_periods=12, scaling_factor=1.0, adjustment_factor=None):
     """Robust fallback forecasting method"""
     try:
         # Create a copy to avoid modifying original data
@@ -1141,7 +667,7 @@ def run_fallback_forecast(data, forecast_periods=12, scaling_factor=1.0, reducti
             return np.array([1000 * scaling_factor] * forecast_periods)
 
 
-def create_weighted_ensemble(forecasts_dict, validation_scores, adjustment_factor=None):
+def create_weighted_ensemble(forecasts_dict, validation_scores):
     """Create weighted ensemble based on validation performance"""
     # Convert scores to weights (inverse of error - lower error = higher weight)
     weights = {}
@@ -1172,7 +698,7 @@ def create_weighted_ensemble(forecasts_dict, validation_scores, adjustment_facto
     return ensemble_forecast, weights
 
 
-def run_meta_learning_forecast(forecasts_dict, actual_data=None, forecast_periods=12, adjustment_factor=None):
+def run_meta_learning_forecast(forecasts_dict, actual_data=None, forecast_periods=12):
     """Advanced meta-learning ensemble using stacking"""
     if actual_data is None or len(actual_data) < 12:
         # Fallback to simple ensemble if no validation data
@@ -1270,14 +796,6 @@ def main():
     """
     st.title("🚀 Advanced AI Sales Forecasting Dashboard")
     st.markdown("**Next-generation forecasting with ML optimization, ensemble weighting, and meta-learning**")
-    
-    # Display reduction factor information
-    if adjustment_percentage < 0:
-        st.info(f"📉 **Forecast Reduction Applied**: All predictions are automatically reduced by {abs(adjustment_percentage):.1f}% (adjustable in sidebar)")
-    elif adjustment_percentage > 0:
-        st.info(f"📈 **Forecast Increase Applied**: All predictions are automatically increased by {adjustment_percentage:.1f}% (adjustable in sidebar)")
-    else:
-        st.info("⚖️ **No Adjustment Applied**: Forecasts show original predicted values (adjustable in sidebar)")
 
     # Sidebar configuration
     st.sidebar.header("⚙️ Advanced Configuration")
@@ -1287,8 +805,8 @@ def main():
         index=0
     )
 
-    # Sidebar option to adjust reduction factor
-    st.sidebar.subheader("📉 Forecast Adjustment")
+    # Sidebar option to adjust forecast
+    st.sidebar.subheader("📊 Forecast Adjustment")
     
     # Choice between slider and custom input
     adjustment_mode = st.sidebar.radio(
@@ -1344,6 +862,14 @@ def main():
         **No Change:**
         - 0% = 100% of original (1.00x)
         """)
+    
+    # Display adjustment factor information
+    if adjustment_percentage < 0:
+        st.info(f"📉 **Forecast Reduction Applied**: All predictions are automatically reduced by {abs(adjustment_percentage):.1f}% (adjustable in sidebar)")
+    elif adjustment_percentage > 0:
+        st.info(f"📈 **Forecast Increase Applied**: All predictions are automatically increased by {adjustment_percentage:.1f}% (adjustable in sidebar)")
+    else:
+        st.info("⚖️ **No Adjustment Applied**: Forecasts show original predicted values (adjustable in sidebar)")
 
     # Advanced options
     st.sidebar.subheader("🔬 Advanced Options")
@@ -1488,7 +1014,7 @@ def main():
     if st.button("🚀 Generate Advanced AI Forecasts", type="primary"):
         st.subheader("🚀 Generating Advanced AI Forecasts...")
         
-        # Show reduction factor being applied
+        # Show adjustment factor being applied
         if adjustment_percentage < 0:
             st.info(f"📉 **Note**: All forecasts will be reduced by {abs(adjustment_percentage):.1f}% (multiplied by {current_adjustment_factor:.2f})")
         elif adjustment_percentage > 0:
@@ -1525,7 +1051,7 @@ def main():
         for i, (model_name, model_func) in enumerate(models_to_run):
             with st.spinner(f"🤖 Running advanced {model_name} with optimization..."):
                 try:
-                    # Run the model with error handling - pass adjustment_factor as keyword argument
+                    # Run the model with error handling
                     result = model_func(hist_df, forecast_periods=12, scaling_factor=scaling_factor, adjustment_factor=current_adjustment_factor)
                     
                     if isinstance(result, tuple) and len(result) >= 2:
@@ -1541,8 +1067,8 @@ def main():
                         # Ensure we have exactly 12 values
                         if len(forecast_values) != 12:
                             st.warning(f"⚠️ {model_name} returned {len(forecast_values)} values instead of 12. Using fallback.")
-                            forecast_values = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor, reduction_factor=current_reduction_factor)
-                            forecast_values = apply_forecast_reduction(forecast_values, current_reduction_factor)
+                            forecast_values = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor, adjustment_factor=current_adjustment_factor)
+                            forecast_values = apply_forecast_adjustment(forecast_values, current_adjustment_factor)
                             validation_score = np.inf
                         
                         # Check for valid forecasts
@@ -1550,8 +1076,8 @@ def main():
                               np.any(np.isnan(forecast_values)) or 
                               np.any(np.isinf(forecast_values))):
                             st.warning(f"⚠️ {model_name} produced invalid forecast values. Using fallback.")
-                            forecast_values = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor, reduction_factor=current_reduction_factor)
-                            forecast_values = apply_forecast_reduction(forecast_values, current_reduction_factor)
+                            forecast_values = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor, adjustment_factor=current_adjustment_factor)
+                            forecast_values = apply_forecast_adjustment(forecast_values, current_adjustment_factor)
                             validation_score = np.inf
                         
                         # Store valid forecast
@@ -1567,15 +1093,15 @@ def main():
                         
                     else:
                         st.warning(f"⚠️ {model_name} returned invalid format. Using fallback.")
-                        fallback_forecast = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor, reduction_factor=current_reduction_factor)
-                        fallback_forecast = apply_forecast_reduction(fallback_forecast, current_reduction_factor)
+                        fallback_forecast = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor, adjustment_factor=current_adjustment_factor)
+                        fallback_forecast = apply_forecast_adjustment(fallback_forecast, current_adjustment_factor)
                         forecast_results[f"{model_name}_Forecast"] = fallback_forecast
                         validation_scores[model_name] = np.inf
                     
                 except Exception as e:
                     st.error(f"❌ Advanced {model_name} failed: {str(e)}")
-                    fallback_forecast = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor, reduction_factor=current_reduction_factor)
-                    fallback_forecast = apply_forecast_reduction(fallback_forecast, current_reduction_factor)
+                    fallback_forecast = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor, adjustment_factor=current_adjustment_factor)
+                    fallback_forecast = apply_forecast_adjustment(fallback_forecast, current_adjustment_factor)
                     forecast_results[f"{model_name}_Forecast"] = fallback_forecast
                     validation_scores[model_name] = np.inf
 
@@ -1590,7 +1116,7 @@ def main():
         if len(forecast_results) > 1:
             with st.spinner("🔥 Creating intelligent weighted ensemble..."):
                 try:
-                    ensemble_values, ensemble_weights = create_weighted_ensemble(forecast_results, validation_scores, current_reduction_factor)
+                    ensemble_values, ensemble_weights = create_weighted_ensemble(forecast_results, validation_scores)
                     forecast_results["Weighted_Ensemble"] = ensemble_values
                     
                     # Show ensemble weights
@@ -1602,7 +1128,7 @@ def main():
         if enable_meta_learning and actual_2024_df is not None:
             with st.spinner("🧠 Training meta-learning model..."):
                 try:
-                    meta_forecast = run_meta_learning_forecast(forecast_results, actual_2024_df, forecast_periods=12, reduction_factor=current_reduction_factor)
+                    meta_forecast = run_meta_learning_forecast(forecast_results, actual_2024_df, forecast_periods=12)
                     if meta_forecast is not None:
                         forecast_results["Meta_Learning"] = meta_forecast
                         st.success("✅ Meta-learning ensemble created successfully")
@@ -1627,8 +1153,13 @@ def main():
         # Display results
         st.subheader("📊 Advanced Forecast Results")
         
-        # Show reduction impact
-        st.info(f"📉 **Reduction Applied**: All forecast values shown below have been reduced by {reduction_percentage}%")
+        # Show adjustment impact
+        if adjustment_percentage < 0:
+            st.info(f"📉 **Adjustment Applied**: All forecast values shown below have been reduced by {abs(adjustment_percentage):.1f}%")
+        elif adjustment_percentage > 0:
+            st.info(f"📈 **Adjustment Applied**: All forecast values shown below have been increased by {adjustment_percentage:.1f}%")
+        else:
+            st.info("⚖️ **No Adjustment Applied**: Forecast values show original predictions")
         
         # Debug information - show forecast summaries
         if forecast_results:
@@ -1644,7 +1175,7 @@ def main():
                         'Mean Value': f"{np.mean(forecast_array):,.0f}",
                         'Total Annual': f"{np.sum(forecast_array):,.0f}",
                         'Values Valid': "✅" if len(forecast_array) == 12 and not np.all(forecast_array == 0) else "❌",
-                        'Reduction Applied': f"{reduction_percentage}%"
+                        'Adjustment Applied': f"{adjustment_percentage:+.1f}%"
                     })
             
             if debug_data:
@@ -1678,7 +1209,7 @@ def main():
             st.info(f"📅 **Available actual data for {len(available_months)} months:** {', '.join(available_months)}")
             
             # Create improved comparison chart
-            fig = create_comparison_chart_for_available_months_only(result_df, forecast_year, reduction_percentage)
+            fig = create_comparison_chart_for_available_months_only(result_df, forecast_year, adjustment_percentage)
             
             if fig:
                 st.plotly_chart(fig, use_container_width=True)
@@ -1686,7 +1217,10 @@ def main():
             # Advanced performance metrics - only for available months
             st.subheader("🎯 Advanced Performance Analysis")
             st.caption(f"Performance calculated only for months with actual data ({len(actual_data)} months)")
-            st.warning(f"⚠️ **Note**: Forecasts have been reduced by {reduction_percentage}%, which may affect accuracy metrics when compared to unreduced actual values.")
+            
+            if adjustment_percentage != 0:
+                adj_text = f"reduced by {abs(adjustment_percentage):.1f}%" if adjustment_percentage < 0 else f"increased by {adjustment_percentage:.1f}%"
+                st.warning(f"⚠️ **Note**: Forecasts have been {adj_text}, which may affect accuracy metrics when compared to original actual values.")
             
             performance_data = []
             actual_total = actual_data[actual_col].sum()
@@ -1719,7 +1253,7 @@ def main():
                         'Validation Score': val_score_text,
                         'Accuracy': f"{100 - metrics['MAPE']:.1f}%",
                         'Data Coverage': f"{len(actual_data)}/12 months",
-                        'Reduction Applied': f"{reduction_percentage}%"
+                        'Adjustment Applied': f"{adjustment_percentage:+.1f}%"
                     })
             
             if performance_data:
@@ -1760,8 +1294,16 @@ def main():
                     marker=dict(size=6)
                 ))
             
+            # Create dynamic title based on adjustment
+            if adjustment_percentage < 0:
+                adj_text = f"{abs(adjustment_percentage):.1f}% Reduction Applied"
+            elif adjustment_percentage > 0:
+                adj_text = f"{adjustment_percentage:.1f}% Increase Applied"
+            else:
+                adj_text = "No Adjustment Applied"
+            
             fig.update_layout(
-                title=f'🚀 ADVANCED AI FORECAST MODELS COMPARISON ({reduction_percentage}% Reduction Applied)',
+                title=f'🚀 ADVANCED AI FORECAST MODELS COMPARISON ({adj_text})',
                 xaxis_title='Month',
                 yaxis_title='Sales Volume',
                 height=700,
@@ -1770,189 +1312,22 @@ def main():
             
             st.plotly_chart(fig, use_container_width=True)
 
-        # ADVANCED EXCEL DOWNLOAD
-        st.subheader("📊 Advanced Analytics Export")
-        
-        @st.cache_data
-        def create_advanced_excel_report(result_df, hist_df, forecast_year, scaling_factor, validation_scores, ensemble_weights=None, reduction_factor=None):
-            output = io.BytesIO()
-            
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                # Sheet 1: Main Results
-                main_sheet = result_df.copy()
-                main_sheet['Month'] = main_sheet['Month'].dt.strftime('%Y-%m-%d')
-                main_sheet.to_excel(writer, sheet_name='Advanced_Results', index=False)
-                
-                # Sheet 2: Model Performance Metrics
-                actual_col = f'Actual_{forecast_year}'
-                if actual_col in result_df.columns and result_df[actual_col].notna().any():
-                    model_cols = [col for col in result_df.columns if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']]
-                    actual_subset = result_df[result_df[actual_col].notna()]
-                    
-                    perf_data = []
-                    for col in model_cols:
-                        model_name = col.replace('_Forecast', '').replace('_', ' ')
-                        metrics = calculate_accuracy_metrics(actual_subset[actual_col], actual_subset[col])
-                        
-                        if metrics:
-                            val_score = validation_scores.get(model_name.replace(' ', ''), np.inf)
-                            perf_data.append({
-                                'Model': model_name,
-                                'MAPE': round(metrics['MAPE'], 2),
-                                'SMAPE': round(metrics['SMAPE'], 2),
-                                'MAE': round(metrics['MAE'], 0),
-                                'RMSE': round(metrics['RMSE'], 0),
-                                'MASE': round(metrics['MASE'], 3),
-                                'Validation_Score': round(val_score, 2) if val_score != np.inf else 'N/A',
-                                'Total_Forecast': round(result_df[col].sum(), 0),
-                                'Scaling_Applied': f"{scaling_factor:.2f}x",
-                                'Reduction_Applied': f"{(1-reduction_factor)*100:.0f}%" if reduction_factor else "N/A",
-                                'Reduction_Factor': reduction_factor if reduction_factor else "N/A"
-                            })
-                    
-                    if perf_data:
-                        perf_df = pd.DataFrame(perf_data)
-                        perf_df.to_excel(writer, sheet_name='Advanced_Performance', index=False)
-                
-                # Sheet 3: Ensemble Analysis
-                if ensemble_weights:
-                    ensemble_data = pd.DataFrame([
-                        {'Model': k, 'Weight': f"{v:.1%}", 'Weight_Numeric': v} 
-                        for k, v in ensemble_weights.items()
-                    ])
-                    ensemble_data.to_excel(writer, sheet_name='Ensemble_Weights', index=False)
-                
-                # Sheet 4: Advanced Data Analysis
-                data_analysis = []
-                
-                # Seasonality analysis
-                monthly_data = hist_df.groupby('Month')['Sales'].sum().reset_index()
-                if len(monthly_data) >= 24 and STATSMODELS_AVAILABLE:
-                    try:
-                        decomposition = seasonal_decompose(monthly_data['Sales'], model='additive', period=12)
-                        seasonal_strength = np.var(decomposition.seasonal) / np.var(monthly_data['Sales'])
-                        data_analysis.append({'Metric': 'Seasonality_Strength', 'Value': seasonal_strength})
-                    except:
-                        pass
-                
-                # Trend analysis
-                if len(monthly_data) >= 12:
-                    try:
-                        recent_trend = np.polyfit(range(len(monthly_data['Sales'].tail(12))), monthly_data['Sales'].tail(12), 1)[0]
-                        data_analysis.append({'Metric': 'Recent_Trend_Slope', 'Value': recent_trend})
-                    except:
-                        pass
-                
-                # Data quality metrics
-                unique_months = hist_df['Month'].nunique()
-                data_analysis.extend([
-                    {'Metric': 'Unique_Months', 'Value': unique_months},
-                    {'Metric': 'Total_Data_Points', 'Value': len(hist_df)},
-                    {'Metric': 'Data_Quality_Score', 'Value': min(100, unique_months * 4.17)},
-                    {'Metric': 'Scaling_Factor', 'Value': scaling_factor},
-                    {'Metric': 'Log_Transformed', 'Value': hist_df.get('log_transformed', [False])[0] if len(hist_df) > 0 else False},
-                    {'Metric': 'Reduction_Factor_Applied', 'Value': reduction_factor if reduction_factor else "N/A"},
-                    {'Metric': 'Reduction_Percentage', 'Value': f"{(1-reduction_factor)*100:.0f}%" if reduction_factor else "N/A"}
-                ])
-                
-                if data_analysis:
-                    analysis_df = pd.DataFrame(data_analysis)
-                    analysis_df.to_excel(writer, sheet_name='Data_Analysis', index=False)
-                
-                # Sheet 5: Feature Importance (if XGBoost was used)
-                if 'XGBoost_Forecast' in result_df.columns:
-                    feature_importance = pd.DataFrame({
-                        'Feature': ['lag_1', 'rolling_mean_12', 'month_sin', 'trend_12', 'seasonal_ratio'],
-                        'Importance': [0.25, 0.20, 0.15, 0.10, 0.08],
-                        'Description': [
-                            'Previous month sales',
-                            '12-month rolling average',
-                            'Monthly seasonality (sin)',
-                            '12-month trend',
-                            'Seasonal ratio'
-                        ]
-                    })
-                    feature_importance.to_excel(writer, sheet_name='Feature_Importance', index=False)
-                
-                # Sheet 6: Reduction Impact Analysis
-                if actual_col in result_df.columns and result_df[actual_col].notna().any() and reduction_factor:
-                    model_cols = [col for col in result_df.columns if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']]
-                    
-                    reduction_impact = []
-                    for col in model_cols:
-                        model_name = col.replace('_Forecast', '').replace('_', ' ')
-                        reduced_total = result_df[col].sum()
-                        original_total = reduced_total / reduction_factor
-                        reduction_amount = original_total - reduced_total
-                        
-                        reduction_impact.append({
-                            'Model': model_name,
-                            'Original_Forecast_Total': round(original_total, 0),
-                            'Reduced_Forecast_Total': round(reduced_total, 0),
-                            'Reduction_Amount': round(reduction_amount, 0),
-                            'Reduction_Percentage': f"{(1-reduction_factor)*100:.0f}%",
-                            'Reduction_Factor': reduction_factor
-                        })
-                    
-                    if reduction_impact:
-                        reduction_df = pd.DataFrame(reduction_impact)
-                        reduction_df.to_excel(writer, sheet_name='Reduction_Impact', index=False)
-            
-            output.seek(0)
-            return output
-        
-        # Generate advanced report
-        excel_data = create_advanced_excel_report(
-            result_df, hist_df, forecast_year, scaling_factor, 
-            validation_scores, ensemble_weights if 'Weighted_Ensemble' in result_df.columns else None, current_reduction_factor
-        )
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.download_button(
-                label="🚀 Download Advanced Analytics Report",
-                data=excel_data,
-                file_name=f"advanced_ai_forecast_report_{forecast_year}_reduced_{reduction_percentage}pct.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        
-        with col2:
-            csv = result_df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="📄 Download CSV Data",
-                data=csv,
-                file_name=f"advanced_forecasts_{forecast_year}_reduced_{reduction_percentage}pct.csv",
-                mime="text/csv"
-            )
-        
-        # Show what's included
-        st.info(f"""
-        **🚀 Advanced Analytics Report Contains:**
-        - **Advanced_Results**: All forecasts with intelligent weighting (reduced by {reduction_percentage}%)
-        - **Advanced_Performance**: Enhanced metrics (MAPE, SMAPE, MASE, validation scores)  
-        - **Ensemble_Weights**: Intelligent weighting based on validation performance
-        - **Data_Analysis**: Seasonality, trend, and quality analysis
-        - **Feature_Importance**: ML model feature rankings (if applicable)
-        - **Reduction_Impact**: Analysis of reduction impact on forecasts
-        """)
-
-        # Final advanced summary
-        st.subheader("🎯 Advanced Forecast Intelligence Summary")
+        # Summary
+        st.subheader("🎯 Advanced Forecast Summary")
         
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
             if 'Weighted_Ensemble' in result_df.columns:
                 ensemble_total = result_df['Weighted_Ensemble'].sum()
-                original_ensemble_total = ensemble_total / current_reduction_factor
+                original_ensemble_total = ensemble_total / current_adjustment_factor if current_adjustment_factor != 0 else ensemble_total
                 st.metric("🔥 Intelligent Ensemble", f"{ensemble_total:,.0f}", 
                          delta=f"Original: {original_ensemble_total:,.0f}")
         
         with col2:
             if 'Meta_Learning' in result_df.columns:
                 meta_total = result_df['Meta_Learning'].sum()
-                original_meta_total = meta_total / current_reduction_factor
+                original_meta_total = meta_total / current_adjustment_factor if current_adjustment_factor != 0 else meta_total
                 st.metric("🧠 Meta-Learning", f"{meta_total:,.0f}",
                          delta=f"Original: {original_meta_total:,.0f}")
         
@@ -1962,46 +1337,26 @@ def main():
             st.metric("🤖 Models Successful", f"{successful_models}/{total_models}")
         
         with col4:
-            combined_factor = scaling_factor * current_reduction_factor
-            st.metric("📊 Combined Adjustment", f"{combined_factor:.2f}x",
-                     delta=f"Scale: {scaling_factor:.2f}x, Reduce: {current_reduction_factor:.2f}x")
+            combined_factor = scaling_factor * current_adjustment_factor
+            st.metric("📊 Combined Factor", f"{combined_factor:.3f}x")
 
-        # Summary of adjustments applied
-        st.subheader("📋 Forecast Adjustments Summary")
+        # Download options
+        st.subheader("📊 Download Results")
         
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         
         with col1:
-            st.info(f"""
-            **📉 Reduction Applied**
-            - Reduction: {reduction_percentage}%
-            - Factor: {current_reduction_factor:.2f}x
-            - Applied to: All forecasts
-            """)
+            csv = result_df.to_csv(index=False).encode("utf-8")
+            adj_text = f"adj_{adjustment_percentage:+.1f}pct" if adjustment_percentage != 0 else "no_adj"
+            st.download_button(
+                label="📄 Download CSV Data",
+                data=csv,
+                file_name=f"advanced_forecasts_{forecast_year}_{adj_text}.csv",
+                mime="text/csv"
+            )
         
         with col2:
-            if scaling_factor != 1.0:
-                st.info(f"""
-                **📊 Scaling Applied**
-                - Scale factor: {scaling_factor:.2f}x
-                - Reason: Data scale mismatch detected
-                - Applied before reduction
-                """)
-            else:
-                st.info(f"""
-                **📊 Scaling Applied**
-                - Scale factor: 1.0x (None)
-                - Reason: No scale mismatch detected
-                """)
-        
-        with col3:
-            total_adjustment = scaling_factor * current_reduction_factor
-            st.info(f"""
-            **🔄 Total Adjustment**
-            - Combined factor: {total_adjustment:.2f}x
-            - Order: Scale → Reduce
-            - Net effect: {((total_adjustment - 1) * 100):+.0f}%
-            """)
+            st.info("📊 CSV contains all forecast results with adjustments applied")
 
 
 if __name__ == "__main__":
