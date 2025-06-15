@@ -257,36 +257,58 @@ def preprocess_data(df):
     """
     Advanced data preprocessing for improved accuracy.
     """
-    # Store original sales for reference
-    df['Sales_Original'] = df['Sales'].copy()
-    
-    # 1. Outlier Detection and Treatment using IQR
-    Q1 = df['Sales'].quantile(0.25)
-    Q3 = df['Sales'].quantile(0.75)
-    IQR = Q3 - Q1
-    lower_bound = Q1 - 1.5 * IQR
-    upper_bound = Q3 + 1.5 * IQR
-    
-    # Cap outliers instead of removing (preserves data points)
-    outliers_detected = ((df['Sales'] < lower_bound) | (df['Sales'] > upper_bound)).sum()
-    if outliers_detected > 0:
-        st.info(f"📊 Detected and capped {outliers_detected} outliers for better model stability")
-        df['Sales'] = df['Sales'].clip(lower=lower_bound, upper=upper_bound)
-    
-    # 2. Handle missing values with interpolation
-    if df['Sales'].isna().any():
-        df['Sales'] = df['Sales'].interpolate(method='time')
-    
-    # 3. Data transformation - test for optimal transformation
-    skewness = stats.skew(df['Sales'])
-    if abs(skewness) > 1:  # Highly skewed data
-        st.info(f"📈 Data skewness detected ({skewness:.2f}). Applying log transformation for better modeling.")
-        df['Sales'] = np.log1p(df['Sales'])  # log1p handles zeros better
-        df['log_transformed'] = True
-    else:
+    try:
+        st.write("🔧 Starting data preprocessing...")
+        
+        # Store original sales for reference
+        df['Sales_Original'] = df['Sales'].copy()
+        
+        # 1. Outlier Detection and Treatment using IQR
+        st.write("🎯 Detecting outliers...")
+        Q1 = df['Sales'].quantile(0.25)
+        Q3 = df['Sales'].quantile(0.75)
+        IQR = Q3 - Q1
+        lower_bound = Q1 - 1.5 * IQR
+        upper_bound = Q3 + 1.5 * IQR
+        
+        # Cap outliers instead of removing (preserves data points)
+        outliers_detected = ((df['Sales'] < lower_bound) | (df['Sales'] > upper_bound)).sum()
+        if outliers_detected > 0:
+            st.info(f"📊 Detected and capped {outliers_detected} outliers for better model stability")
+            df['Sales'] = df['Sales'].clip(lower=lower_bound, upper=upper_bound)
+        else:
+            st.write("✅ No outliers detected")
+        
+        # 2. Handle missing values with interpolation
+        st.write("📊 Checking for missing values...")
+        missing_count = df['Sales'].isna().sum()
+        if missing_count > 0:
+            st.info(f"🔧 Interpolating {missing_count} missing values")
+            df['Sales'] = df['Sales'].interpolate(method='time')
+        else:
+            st.write("✅ No missing values found")
+        
+        # 3. Data transformation - test for optimal transformation
+        st.write("📈 Analyzing data distribution...")
+        skewness = stats.skew(df['Sales'])
+        st.write(f"📊 Data skewness: {skewness:.2f}")
+        
+        if abs(skewness) > 1:  # Highly skewed data
+            st.info(f"📈 Data skewness detected ({skewness:.2f}). Applying log transformation for better modeling.")
+            df['Sales'] = np.log1p(df['Sales'])  # log1p handles zeros better
+            df['log_transformed'] = True
+        else:
+            st.write("✅ Data distribution is acceptable, no transformation needed")
+            df['log_transformed'] = False
+        
+        st.write("✅ Preprocessing completed successfully")
+        return df
+        
+    except Exception as e:
+        st.error(f"❌ Error in preprocessing: {str(e)}")
+        # Return original data if preprocessing fails
         df['log_transformed'] = False
-    
-    return df
+        return df
 
 
 @st.cache_data
@@ -1299,9 +1321,24 @@ def main():
         st.info("👆 Please upload historical sales data to begin advanced forecasting.")
         return
 
-    # Load and validate historical data
-    hist_df = load_data(historical_file)
-    if hist_df is None:
+    # Add debugging and progress tracking for data loading
+    st.write("🔄 **Loading and processing data...**")
+    
+    try:
+        with st.spinner("📊 Loading historical data..."):
+            # Load and validate historical data
+            hist_df = load_data(historical_file)
+            
+        if hist_df is None:
+            st.error("❌ Failed to load historical data. Please check the file format.")
+            st.info("📋 **Requirements**: Excel file with 'Month' and 'Sales' columns")
+            return
+            
+        st.success(f"✅ Historical data loaded successfully! ({len(hist_df)} rows)")
+        
+    except Exception as e:
+        st.error(f"❌ Error loading historical data: {str(e)}")
+        st.info("📋 **Debug Info**: Please ensure your file has 'Month' and 'Sales' columns")
         return
 
     # Load actual data for scaling detection and validation
@@ -1309,9 +1346,19 @@ def main():
     scaling_factor = 1.0
     
     if actual_2024_file is not None:
-        actual_2024_df = load_actual_2024_data(actual_2024_file, forecast_year)
-        if actual_2024_df is not None:
-            scaling_factor = detect_and_apply_scaling(hist_df, actual_2024_df)
+        try:
+            with st.spinner(f"📈 Loading {forecast_year} actual data..."):
+                actual_2024_df = load_actual_2024_data(actual_2024_file, forecast_year)
+                
+            if actual_2024_df is not None:
+                scaling_factor = detect_and_apply_scaling(hist_df, actual_2024_df)
+                st.success(f"✅ Actual data loaded successfully! ({len(actual_2024_df)} months)")
+            else:
+                st.warning(f"⚠️ Could not load {forecast_year} actual data")
+                
+        except Exception as e:
+            st.error(f"❌ Error loading actual data: {str(e)}")
+            actual_2024_df = None
 
     # Display enhanced data info
     st.subheader("📊 Advanced Data Analysis")
