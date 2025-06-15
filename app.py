@@ -89,6 +89,124 @@ def load_data(uploaded_file):
         df = pd.read_excel(uploaded_file)
     except Exception:
         st.error("Could not read the uploaded file. Please ensure it's a valid Excel file.")
+def create_historical_overview_chart(hist_df):
+    """
+    Create a comprehensive historical overview chart for the bottom section
+    """
+    try:
+        # Create a copy and ensure we have the right data
+        work_data = hist_df.copy()
+        
+        # Ensure Month is datetime
+        work_data['Month'] = pd.to_datetime(work_data['Month'])
+        
+        # Use original sales data if available, otherwise use processed data
+        sales_col = 'Sales_Original' if 'Sales_Original' in work_data.columns else 'Sales'
+        
+        # Extract year and month for grouping
+        work_data['Year'] = work_data['Month'].dt.year
+        work_data['Month_Name'] = work_data['Month'].dt.strftime('%b')
+        work_data['Month_Num'] = work_data['Month'].dt.month
+        
+        # Aggregate sales by month (sum all entries for each month)
+        monthly_data = work_data.groupby('Month', as_index=False).agg({
+            sales_col: 'sum',
+            'Year': 'first',
+            'Month_Name': 'first', 
+            'Month_Num': 'first'
+        }).rename(columns={sales_col: 'Sales'})
+        
+        # Get unique years
+        years = sorted(monthly_data['Year'].unique())
+        
+        # Create the figure
+        fig = go.Figure()
+        colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#FF9F43', '#6C5CE7']
+        
+        if len(years) == 1:
+            # Single year view
+            year_data = monthly_data[monthly_data['Year'] == years[0]]
+            year_data = year_data.sort_values('Month_Num')
+            
+            fig.add_trace(go.Scatter(
+                x=year_data['Month_Name'],
+                y=year_data['Sales'],
+                mode='lines+markers',
+                name=f'{years[0]} Overview',
+                line=dict(color=colors[0], width=4),
+                marker=dict(size=10),
+                hovertemplate=f'<b>{years[0]} Overview</b><br>Month: %{{x}}<br>Sales: %{{y:,.0f}}<extra></extra>',
+                uid=f'overview_single_{years[0]}'  # Unique identifier
+            ))
+            
+            fig.update_layout(
+                title=f'📊 Complete Sales Overview - {years[0]}',
+                xaxis_title='Month',
+                yaxis_title='Sales Volume',
+                height=500
+            )
+        
+        else:
+            # Multiple years view with different styling
+            for i, year in enumerate(years):
+                year_data = monthly_data[monthly_data['Year'] == year]
+                year_data = year_data.sort_values('Month_Num')
+                
+                # Calculate year total for display
+                year_total = year_data['Sales'].sum()
+                
+                # Use different line styles for overview
+                line_dash = 'solid' if i % 2 == 0 else 'dash'
+                
+                fig.add_trace(go.Scatter(
+                    x=year_data['Month_Name'],
+                    y=year_data['Sales'],
+                    mode='lines+markers',
+                    name=f'{year} Overview (Total: {year_total:,.0f})',
+                    line=dict(color=colors[i % len(colors)], width=3, dash=line_dash),
+                    marker=dict(size=8),
+                    hovertemplate=f'<b>{year} Overview</b><br>Month: %{{x}}<br>Sales: %{{y:,.0f}}<extra></extra>',
+                    uid=f'overview_multi_{year}'  # Unique identifier
+                ))
+            
+            # Calculate overall insights
+            total_years = len(years)
+            first_year_total = monthly_data[monthly_data['Year'] == years[0]]['Sales'].sum()
+            last_year_total = monthly_data[monthly_data['Year'] == years[-1]]['Sales'].sum()
+            overall_growth = ((last_year_total - first_year_total) / first_year_total * 100) if first_year_total > 0 else 0
+            
+            fig.update_layout(
+                title=f'📊 Complete Historical Sales Overview ({total_years} Years)<br><sub>Overall Growth from {years[0]} to {years[-1]}: {overall_growth:+.1f}%</sub>',
+                xaxis_title='Month',
+                yaxis_title='Sales Volume',
+                height=600,
+                legend=dict(
+                    orientation="v",
+                    yanchor="top",
+                    y=1,
+                    xanchor="left",
+                    x=1.01
+                )
+            )
+        
+        # Customize the chart with different styling
+        fig.update_xaxes(
+            tickmode='array',
+            tickvals=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        )
+        
+        fig.update_layout(
+            showlegend=True,
+            hovermode='x unified',
+            plot_bgcolor='rgba(240,240,240,0.1)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(size=12)
+        )
+        
+        return fig
+        
+    except Exception as e:
+        st.error(f"Error creating historical overview chart: {str(e)}")
         return None
 
     if "Month" not in df.columns or "Sales" not in df.columns:
@@ -860,10 +978,11 @@ def create_historical_sales_comparison_chart(hist_df):
                     x=year_data['Month_Name'],
                     y=year_data['Sales'],
                     mode='lines+markers',
-                    name=f'{year} (Total: {year_total:,.0f})',
+                    name=f'{year} Analysis (Total: {year_total:,.0f})',
                     line=dict(color=colors[i % len(colors)], width=3),
                     marker=dict(size=8),
-                    hovertemplate=f'<b>{year}</b><br>Month: %{{x}}<br>Sales: %{{y:,.0f}}<extra></extra>'
+                    hovertemplate=f'<b>{year} Analysis</b><br>Month: %{{x}}<br>Sales: %{{y:,.0f}}<extra></extra>',
+                    uid=f'historical_analysis_multi_{year}'  # Unique identifier
                 ))
             
             # Add year-over-year growth analysis
@@ -1283,7 +1402,7 @@ def main():
     # Create historical comparison chart
     historical_chart = create_historical_sales_comparison_chart(hist_df)
     if historical_chart:
-        st.plotly_chart(historical_chart, use_container_width=True)
+        st.plotly_chart(historical_chart, use_container_width=True, key="historical_analysis_chart")
     
     # Show yearly summary table
     yearly_summary = create_yearly_summary_table(hist_df)
@@ -1630,7 +1749,7 @@ def main():
                 hovermode='x unified'
             )
             
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="forecast_only_chart")
 
         # Summary
         st.subheader("🎯 Advanced Forecast Summary")
@@ -1683,10 +1802,10 @@ def main():
     st.subheader("📊 Complete Historical Sales Overview")
     st.markdown("**Complete view of your historical sales data across all years for reference**")
     
-    # Create a comprehensive historical chart
-    historical_overview = create_historical_sales_comparison_chart(hist_df)
+    # Create a comprehensive historical chart using different function
+    historical_overview = create_historical_overview_chart(hist_df)
     if historical_overview:
-        st.plotly_chart(historical_overview, use_container_width=True)
+        st.plotly_chart(historical_overview, use_container_width=True, key="historical_overview_bottom")
         
         # Add some context about the historical data
         work_data = hist_df.copy()
