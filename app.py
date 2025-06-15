@@ -1,25 +1,4 @@
-if scaling_factor != 1.0:
-                st.info(f"""
-                **📊 Scaling Applied**
-                - Scale factor: {scaling_factor:.2f}x
-                - Reason: Data scale mismatch detected
-                - Applied before reduction
-                """)
-            else:
-                st.info(f"""
-                **📊 Scaling Applied**
-                - Scale factor: 1.0x (None)
-                - Reason: No scale mismatch detected
-                """)
-        
-        with col3:
-            total_adjustment = scaling_factor * current_reduction_factor
-            st.info(f"""
-            **🔄 Total Adjustment**
-            - Combined factor: {total_adjustment:.2f}x
-            - Order: Scale → Reduce
-            - Net effect: {((total_adjustment - 1) * 100):+.0f}%
-            """)import streamlit as st
+import streamlit as st
 
 # Configure streamlit FIRST - must be before any other st commands
 st.set_page_config(page_title="Advanced Sales Forecasting Dashboard", layout="wide")
@@ -382,14 +361,12 @@ def run_advanced_sarima_forecast(data, forecast_periods=12, scaling_factor=1.0, 
     try:
         if not STATSMODELS_AVAILABLE:
             forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, reduction_factor)
-            # MODIFIED: Apply reduction
             return apply_forecast_reduction(forecast_values, reduction_factor), np.inf
         
         # Ensure we have enough data points
         if len(data) < 24:
             st.warning("⚠️ SARIMA needs at least 24 data points. Using fallback method.")
             forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, reduction_factor)
-            # MODIFIED: Apply reduction
             return apply_forecast_reduction(forecast_values, reduction_factor), np.inf
         
         # Create a copy to avoid modifying original data
@@ -461,13 +438,12 @@ def run_advanced_sarima_forecast(data, forecast_periods=12, scaling_factor=1.0, 
         if len(forecast_values) != 12:
             raise ValueError(f"Expected 12 forecast values, got {len(forecast_values)}")
         
-        # MODIFIED: Apply reduction
+        # Apply reduction
         return apply_forecast_reduction(forecast_values, reduction_factor), fitted_model.aic
         
     except Exception as e:
         st.warning(f"⚠️ Advanced SARIMA failed: {str(e)}. Using fallback method.")
         forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, reduction_factor)
-        # MODIFIED: Apply reduction
         return apply_forecast_reduction(forecast_values, reduction_factor), np.inf
 
 
@@ -476,7 +452,6 @@ def run_advanced_prophet_forecast(data, forecast_periods=12, scaling_factor=1.0,
     try:
         if not PROPHET_AVAILABLE:
             forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, reduction_factor)
-            # MODIFIED: Apply reduction
             return apply_forecast_reduction(forecast_values, reduction_factor), np.inf
         
         # Create a copy to avoid modifying original data
@@ -521,13 +496,12 @@ def run_advanced_prophet_forecast(data, forecast_periods=12, scaling_factor=1.0,
         # Apply scaling and ensure positive values
         forecast_values = np.maximum(forecast_values, 0) * scaling_factor
         
-        # MODIFIED: Apply reduction
+        # Apply reduction
         return apply_forecast_reduction(forecast_values, reduction_factor), np.mean(np.abs(forecast['yhat'] - prophet_data['y']))
         
     except Exception as e:
         st.warning(f"⚠️ Advanced Prophet failed: {str(e)}. Using fallback method.")
         forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, reduction_factor)
-        # MODIFIED: Apply reduction
         return apply_forecast_reduction(forecast_values, reduction_factor), np.inf
 
 
@@ -536,7 +510,6 @@ def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0, red
     try:
         if not STATSMODELS_AVAILABLE:
             forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, reduction_factor)
-            # MODIFIED: Apply reduction
             return apply_forecast_reduction(forecast_values, reduction_factor), np.inf
         
         # Create a copy to avoid modifying original data
@@ -581,13 +554,12 @@ def run_advanced_ets_forecast(data, forecast_periods=12, scaling_factor=1.0, red
         # Apply scaling and ensure positive values
         forecast_values = np.maximum(forecast_values, 0) * scaling_factor
         
-        # MODIFIED: Apply reduction
+        # Apply reduction
         return apply_forecast_reduction(forecast_values, reduction_factor), fitted_model.aic
         
     except Exception as e:
         st.warning(f"⚠️ Advanced ETS failed: {str(e)}. Using fallback method.")
         forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, reduction_factor)
-        # MODIFIED: Apply reduction
         return apply_forecast_reduction(forecast_values, reduction_factor), np.inf
 
 
@@ -634,13 +606,12 @@ def run_advanced_xgb_forecast(data, forecast_periods=12, scaling_factor=1.0, red
         # Apply scaling and ensure positive values
         forecasts = np.maximum(forecasts, 0) * scaling_factor
         
-        # MODIFIED: Apply reduction
+        # Apply reduction
         return apply_forecast_reduction(forecasts, reduction_factor), 200.0
         
     except Exception as e:
         st.warning(f"⚠️ Advanced XGBoost failed: {str(e)}. Using fallback method.")
         forecast_values = run_fallback_forecast(data, forecast_periods, scaling_factor, reduction_factor)
-        # MODIFIED: Apply reduction
         return apply_forecast_reduction(forecast_values, reduction_factor), np.inf
 
 
@@ -723,7 +694,6 @@ def create_weighted_ensemble(forecasts_dict, validation_scores, reduction_factor
         weight = weights.get(model_key, 0.25)  # Default equal weight if not found
         ensemble_forecast += weight * forecast
     
-    # MODIFIED: Apply reduction to ensemble (note: individual forecasts are already reduced)
     # Since individual forecasts are already reduced, we don't need to reduce again
     return ensemble_forecast, weights
 
@@ -738,14 +708,14 @@ def run_meta_learning_forecast(forecasts_dict, actual_data=None, forecast_period
         # Simple average of all forecasts for now
         forecast_values = list(forecasts_dict.values())
         meta_forecast = np.mean(forecast_values, axis=0)
-        # MODIFIED: Apply reduction to meta learning forecast
-        return apply_forecast_reduction(np.maximum(meta_forecast, 0), reduction_factor)
+        # Since individual forecasts are already reduced, we don't need to reduce again
+        return np.maximum(meta_forecast, 0)
     
     except Exception as e:
         return None
 
 
-def create_comparison_chart_for_available_months_only(result_df, forecast_year):
+def create_comparison_chart_for_available_months_only(result_df, forecast_year, reduction_percentage):
     """
     Create comparison chart only for months where actual data exists
     """
@@ -800,7 +770,7 @@ def create_comparison_chart_for_available_months_only(result_df, forecast_year):
     months_text = ', '.join(month_names)
     
     fig.update_layout(
-        title=f'🚀 ADVANCED AI MODELS vs ACTUAL PERFORMANCE (15% Reduction Applied)<br><sub>Comparison for available months: {months_text}</sub>',
+        title=f'🚀 ADVANCED AI MODELS vs ACTUAL PERFORMANCE ({reduction_percentage}% Reduction Applied)<br><sub>Comparison for available months: {months_text}</sub>',
         xaxis_title='Month',
         yaxis_title='Sales Volume',
         height=700,
@@ -819,8 +789,8 @@ def main():
     st.title("🚀 Advanced AI Sales Forecasting Dashboard")
     st.markdown("**Next-generation forecasting with ML optimization, ensemble weighting, and meta-learning**")
     
-    # ADDED: Display reduction factor information
-    st.info(f"📉 **Forecast Adjustment Applied**: All predictions are automatically reduced by 15% (multiplied by {FORECAST_REDUCTION_FACTOR})")
+    # Display reduction factor information
+    st.info(f"📉 **Forecast Adjustment Applied**: All predictions are automatically reduced by 15% (adjustable in sidebar)")
 
     # Sidebar configuration
     st.sidebar.header("⚙️ Advanced Configuration")
@@ -830,7 +800,7 @@ def main():
         index=0
     )
 
-    # ADDED: Sidebar option to adjust reduction factor
+    # Sidebar option to adjust reduction factor
     st.sidebar.subheader("📉 Forecast Adjustment")
     reduction_percentage = st.sidebar.slider(
         "Forecast Reduction (%)",
@@ -907,17 +877,17 @@ def main():
     st.subheader("📊 Advanced Data Analysis")
 
     # Calculate correct metrics based on unique months
-    unique_months = hist_df['Month'].nunique()  # Count unique months only
+    unique_months = hist_df['Month'].nunique()
     total_sales = hist_df['Sales'].sum()
-    avg_monthly_sales = hist_df.groupby('Month')['Sales'].sum().mean()  # Average per unique month
+    avg_monthly_sales = hist_df.groupby('Month')['Sales'].sum().mean()
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("📅 Total Months", unique_months)  # Fixed: now shows unique months
+        st.metric("📅 Total Months", unique_months)
     with col2:
-        st.metric("📈 Avg Monthly Sales", f"{avg_monthly_sales:,.0f}")  # Fixed: true monthly average
+        st.metric("📈 Avg Monthly Sales", f"{avg_monthly_sales:,.0f}")
     with col3:
-        data_quality = min(100, unique_months * 4.17)  # Quality score based on unique months
+        data_quality = min(100, unique_months * 4.17)
         st.metric("🎯 Data Quality Score", f"{data_quality:.0f}%")
     with col4:
         if 'log_transformed' in hist_df.columns and hist_df['log_transformed'].iloc[0]:
@@ -928,13 +898,11 @@ def main():
     # Show additional data insights
     col1, col2 = st.columns(2)
     with col1:
-        # Date range
         start_date = hist_df['Month'].min().strftime('%Y-%m')
         end_date = hist_df['Month'].max().strftime('%Y-%m')
         st.metric("📅 Data Range", f"{start_date} to {end_date}")
         
     with col2:
-        # Total data points vs unique months
         total_rows = len(hist_df)
         if total_rows > unique_months:
             st.metric("📊 Data Points", f"{total_rows} rows ({unique_months} unique months)")
@@ -949,7 +917,6 @@ def main():
     # Show seasonality and trend analysis
     col1, col2 = st.columns(2)
     with col1:
-        # Seasonality detection - use monthly aggregated data
         monthly_data = hist_df.groupby('Month')['Sales'].sum().reset_index()
         if len(monthly_data) >= 24:
             try:
@@ -965,7 +932,6 @@ def main():
             st.metric("📊 Seasonality", "Need 24+ months")
         
     with col2:
-        # Trend detection - use monthly aggregated data
         if len(monthly_data) >= 12:
             try:
                 recent_trend = np.polyfit(range(len(monthly_data['Sales'].tail(12))), monthly_data['Sales'].tail(12), 1)[0]
@@ -993,8 +959,8 @@ def main():
     if st.button("🚀 Generate Advanced AI Forecasts", type="primary"):
         st.subheader("🚀 Generating Advanced AI Forecasts...")
         
-        # ADDED: Show reduction factor being applied
-        st.info(f"📉 **Note**: All forecasts will be reduced by {reduction_percentage}% (multiplied by {FORECAST_REDUCTION_FACTOR:.2f})")
+        # Show reduction factor being applied
+        st.info(f"📉 **Note**: All forecasts will be reduced by {reduction_percentage}% (multiplied by {current_reduction_factor:.2f})")
 
         # Show optimization status
         if enable_hyperopt:
@@ -1042,16 +1008,16 @@ def main():
                         if len(forecast_values) != 12:
                             st.warning(f"⚠️ {model_name} returned {len(forecast_values)} values instead of 12. Using fallback.")
                             forecast_values = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor, reduction_factor=current_reduction_factor)
-                            forecast_values = apply_forecast_reduction(forecast_values, current_reduction_factor)  # Apply reduction to fallback
+                            forecast_values = apply_forecast_reduction(forecast_values, current_reduction_factor)
                             validation_score = np.inf
                         
-                        # Check for valid forecasts (not all zeros, not NaN/inf)
+                        # Check for valid forecasts
                         elif (np.all(forecast_values == 0) or 
                               np.any(np.isnan(forecast_values)) or 
                               np.any(np.isinf(forecast_values))):
                             st.warning(f"⚠️ {model_name} produced invalid forecast values. Using fallback.")
                             forecast_values = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor, reduction_factor=current_reduction_factor)
-                            forecast_values = apply_forecast_reduction(forecast_values, current_reduction_factor)  # Apply reduction to fallback
+                            forecast_values = apply_forecast_reduction(forecast_values, current_reduction_factor)
                             validation_score = np.inf
                         
                         # Store valid forecast
@@ -1068,14 +1034,14 @@ def main():
                     else:
                         st.warning(f"⚠️ {model_name} returned invalid format. Using fallback.")
                         fallback_forecast = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor, reduction_factor=current_reduction_factor)
-                        fallback_forecast = apply_forecast_reduction(fallback_forecast, current_reduction_factor)  # Apply reduction to fallback
+                        fallback_forecast = apply_forecast_reduction(fallback_forecast, current_reduction_factor)
                         forecast_results[f"{model_name}_Forecast"] = fallback_forecast
                         validation_scores[model_name] = np.inf
                     
                 except Exception as e:
                     st.error(f"❌ Advanced {model_name} failed: {str(e)}")
                     fallback_forecast = run_fallback_forecast(hist_df, forecast_periods=12, scaling_factor=scaling_factor, reduction_factor=current_reduction_factor)
-                    fallback_forecast = apply_forecast_reduction(fallback_forecast, current_reduction_factor)  # Apply reduction to fallback
+                    fallback_forecast = apply_forecast_reduction(fallback_forecast, current_reduction_factor)
                     forecast_results[f"{model_name}_Forecast"] = fallback_forecast
                     validation_scores[model_name] = np.inf
 
@@ -1127,7 +1093,7 @@ def main():
         # Display results
         st.subheader("📊 Advanced Forecast Results")
         
-        # ADDED: Show reduction impact
+        # Show reduction impact
         st.info(f"📉 **Reduction Applied**: All forecast values shown below have been reduced by {reduction_percentage}%")
         
         # Debug information - show forecast summaries
@@ -1178,7 +1144,7 @@ def main():
             st.info(f"📅 **Available actual data for {len(available_months)} months:** {', '.join(available_months)}")
             
             # Create improved comparison chart
-            fig = create_comparison_chart_for_available_months_only(result_df, forecast_year)
+            fig = create_comparison_chart_for_available_months_only(result_df, forecast_year, reduction_percentage)
             
             if fig:
                 st.plotly_chart(fig, use_container_width=True)
@@ -1261,7 +1227,7 @@ def main():
                 ))
             
             fig.update_layout(
-                title=f'🚀 ADVANCED AI FORECAST MODELS COMPARISON (15% Reduction Applied)',
+                title=f'🚀 ADVANCED AI FORECAST MODELS COMPARISON ({reduction_percentage}% Reduction Applied)',
                 xaxis_title='Month',
                 yaxis_title='Sales Volume',
                 height=700,
@@ -1274,7 +1240,7 @@ def main():
         st.subheader("📊 Advanced Analytics Export")
         
         @st.cache_data
-        def create_advanced_excel_report(result_df, hist_df, forecast_year, scaling_factor, validation_scores, ensemble_weights=None, reduction_factor=FORECAST_REDUCTION_FACTOR):
+        def create_advanced_excel_report(result_df, hist_df, forecast_year, scaling_factor, validation_scores, ensemble_weights=None, reduction_factor=None):
             output = io.BytesIO()
             
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -1306,8 +1272,8 @@ def main():
                                 'Validation_Score': round(val_score, 2) if val_score != np.inf else 'N/A',
                                 'Total_Forecast': round(result_df[col].sum(), 0),
                                 'Scaling_Applied': f"{scaling_factor:.2f}x",
-                                'Reduction_Applied': f"{(1-reduction_factor)*100:.0f}%",
-                                'Reduction_Factor': reduction_factor
+                                'Reduction_Applied': f"{(1-reduction_factor)*100:.0f}%" if reduction_factor else "N/A",
+                                'Reduction_Factor': reduction_factor if reduction_factor else "N/A"
                             })
                     
                     if perf_data:
@@ -1351,8 +1317,8 @@ def main():
                     {'Metric': 'Data_Quality_Score', 'Value': min(100, unique_months * 4.17)},
                     {'Metric': 'Scaling_Factor', 'Value': scaling_factor},
                     {'Metric': 'Log_Transformed', 'Value': hist_df.get('log_transformed', [False])[0] if len(hist_df) > 0 else False},
-                    {'Metric': 'Reduction_Factor_Applied', 'Value': reduction_factor},
-                    {'Metric': 'Reduction_Percentage', 'Value': f"{(1-reduction_factor)*100:.0f}%"}
+                    {'Metric': 'Reduction_Factor_Applied', 'Value': reduction_factor if reduction_factor else "N/A"},
+                    {'Metric': 'Reduction_Percentage', 'Value': f"{(1-reduction_factor)*100:.0f}%" if reduction_factor else "N/A"}
                 ])
                 
                 if data_analysis:
@@ -1361,7 +1327,6 @@ def main():
                 
                 # Sheet 5: Feature Importance (if XGBoost was used)
                 if 'XGBoost_Forecast' in result_df.columns:
-                    # Placeholder for feature importance - would be extracted from the actual model
                     feature_importance = pd.DataFrame({
                         'Feature': ['lag_1', 'rolling_mean_12', 'month_sin', 'trend_12', 'seasonal_ratio'],
                         'Importance': [0.25, 0.20, 0.15, 0.10, 0.08],
@@ -1375,9 +1340,8 @@ def main():
                     })
                     feature_importance.to_excel(writer, sheet_name='Feature_Importance', index=False)
                 
-                # ADDED: Sheet 6: Reduction Impact Analysis
-                if actual_col in result_df.columns and result_df[actual_col].notna().any():
-                    # Calculate what forecasts would have been without reduction
+                # Sheet 6: Reduction Impact Analysis
+                if actual_col in result_df.columns and result_df[actual_col].notna().any() and reduction_factor:
                     model_cols = [col for col in result_df.columns if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']]
                     
                     reduction_impact = []
@@ -1406,7 +1370,7 @@ def main():
         # Generate advanced report
         excel_data = create_advanced_excel_report(
             result_df, hist_df, forecast_year, scaling_factor, 
-            validation_scores, ensemble_weights if 'Weighted_Ensemble' in result_df.columns else None, FORECAST_REDUCTION_FACTOR
+            validation_scores, ensemble_weights if 'Weighted_Ensemble' in result_df.columns else None, current_reduction_factor
         )
         
         col1, col2 = st.columns(2)
@@ -1468,7 +1432,7 @@ def main():
             st.metric("📊 Combined Adjustment", f"{combined_factor:.2f}x",
                      delta=f"Scale: {scaling_factor:.2f}x, Reduce: {current_reduction_factor:.2f}x")
 
-        # ADDED: Summary of adjustments applied
+        # Summary of adjustments applied
         st.subheader("📋 Forecast Adjustments Summary")
         
         col1, col2, col3 = st.columns(3)
@@ -1477,7 +1441,7 @@ def main():
             st.info(f"""
             **📉 Reduction Applied**
             - Reduction: {reduction_percentage}%
-            - Factor: {FORECAST_REDUCTION_FACTOR:.2f}x
+            - Factor: {current_reduction_factor:.2f}x
             - Applied to: All forecasts
             """)
         
@@ -1497,7 +1461,7 @@ def main():
                 """)
         
         with col3:
-            total_adjustment = scaling_factor * FORECAST_REDUCTION_FACTOR
+            total_adjustment = scaling_factor * current_reduction_factor
             st.info(f"""
             **🔄 Total Adjustment**
             - Combined factor: {total_adjustment:.2f}x
