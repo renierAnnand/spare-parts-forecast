@@ -1532,7 +1532,7 @@ def main():
             fig = create_comparison_chart_for_available_months_only(result_df, forecast_year, adjustment_percentage)
             
             if fig:
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="forecast_comparison_chart")
             
             # Advanced performance metrics - only for available months
             st.subheader("🎯 Advanced Performance Analysis")
