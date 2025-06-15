@@ -980,19 +980,19 @@ def main():
         # Run each selected model with advanced features
         models_to_run = []
         if use_sarima:
-            models_to_run.append(("SARIMA", lambda *args: run_advanced_sarima_forecast(*args, reduction_factor=current_reduction_factor)))
+            models_to_run.append(("SARIMA", run_advanced_sarima_forecast))
         if use_prophet:
-            models_to_run.append(("Prophet", lambda *args: run_advanced_prophet_forecast(*args, reduction_factor=current_reduction_factor)))
+            models_to_run.append(("Prophet", run_advanced_prophet_forecast))
         if use_ets:
-            models_to_run.append(("ETS", lambda *args: run_advanced_ets_forecast(*args, reduction_factor=current_reduction_factor)))
+            models_to_run.append(("ETS", run_advanced_ets_forecast))
         if use_xgb:
-            models_to_run.append(("XGBoost", lambda *args: run_advanced_xgb_forecast(*args, reduction_factor=current_reduction_factor)))
+            models_to_run.append(("XGBoost", run_advanced_xgb_forecast))
 
         for i, (model_name, model_func) in enumerate(models_to_run):
             with st.spinner(f"🤖 Running advanced {model_name} with optimization..."):
                 try:
-                    # Run the model with error handling
-                    result = model_func(hist_df, forecast_periods=12, scaling_factor=scaling_factor)
+                    # Run the model with error handling - pass reduction_factor as keyword argument
+                    result = model_func(hist_df, forecast_periods=12, scaling_factor=scaling_factor, reduction_factor=current_reduction_factor)
                     
                     if isinstance(result, tuple) and len(result) >= 2:
                         forecast_values, validation_score = result[0], result[1]
