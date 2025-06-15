@@ -715,6 +715,81 @@ def run_meta_learning_forecast(forecasts_dict, actual_data=None, forecast_period
         return None
 
 
+def create_comparison_chart_for_available_months_only(result_df, forecast_year, adjustment_percentage):
+    """
+    Create comparison chart only for months where actual data exists
+    """
+    actual_col = f'Actual_{forecast_year}'
+    
+    if actual_col not in result_df.columns:
+        return None
+    
+    # Filter to only months that have actual data
+    available_data = result_df[result_df[actual_col].notna()].copy()
+    
+    if len(available_data) == 0:
+        return None
+    
+    # Also filter forecast data to the same months for fair comparison
+    forecast_cols = [col for col in result_df.columns if '_Forecast' in col or col in ['Weighted_Ensemble', 'Meta_Learning']]
+    
+    fig = go.Figure()
+    
+    # Add actual data
+    fig.add_trace(go.Scatter(
+        x=available_data['Month'],
+        y=available_data[actual_col],
+        mode='lines+markers',
+        name='🎯 ACTUAL',
+        line=dict(color='#FF6B6B', width=4),
+        marker=dict(size=12, symbol='circle')
+    ))
+    
+    # Add forecast data for the same months
+    colors = ['#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#FF9F43', '#6C5CE7']
+    for i, col in enumerate(forecast_cols):
+        if col in ['Weighted_Ensemble', 'Meta_Learning']:
+            line_style = dict(color='#6C5CE7', width=3, dash='dash') if col == 'Weighted_Ensemble' else dict(color='#00D2D3', width=3, dash='dot')
+            icon = '🔥' if col == 'Weighted_Ensemble' else '🧠'
+        else:
+            line_style = dict(color=colors[i % len(colors)], width=2)
+            icon = '📈'
+        
+        model_name = col.replace('_Forecast', '').replace('_', ' ').upper()
+        fig.add_trace(go.Scatter(
+            x=available_data['Month'],
+            y=available_data[col],
+            mode='lines+markers',
+            name=f'{icon} {model_name}',
+            line=line_style,
+            marker=dict(size=6)
+        ))
+    
+    # Show available months in title
+    month_names = available_data['Month'].dt.strftime('%b').tolist()
+    months_text = ', '.join(month_names)
+    
+    # Create dynamic title based on adjustment
+    if adjustment_percentage < 0:
+        adj_text = f"{abs(adjustment_percentage):.1f}% Reduction Applied"
+    elif adjustment_percentage > 0:
+        adj_text = f"{adjustment_percentage:.1f}% Increase Applied"
+    else:
+        adj_text = "No Adjustment Applied"
+    
+    fig.update_layout(
+        title=f'🚀 ADVANCED AI MODELS vs ACTUAL PERFORMANCE ({adj_text})<br><sub>Comparison for available months: {months_text}</sub>',
+        xaxis_title='Month',
+        yaxis_title='Sales Volume',
+        height=700,
+        hovermode='x unified',
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5)
+    )
+    
+    return fig
+
+
 def create_historical_sales_comparison_chart(hist_df):
     """
     Create a chart showing historical sales comparison across all years
