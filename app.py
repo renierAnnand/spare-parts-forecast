@@ -1489,7 +1489,12 @@ def main():
         st.subheader("🚀 Generating Advanced AI Forecasts...")
         
         # Show reduction factor being applied
-        st.info(f"📉 **Note**: All forecasts will be reduced by {reduction_percentage}% (multiplied by {current_reduction_factor:.2f})")
+        if adjustment_percentage < 0:
+            st.info(f"📉 **Note**: All forecasts will be reduced by {abs(adjustment_percentage):.1f}% (multiplied by {current_adjustment_factor:.2f})")
+        elif adjustment_percentage > 0:
+            st.info(f"📈 **Note**: All forecasts will be increased by {adjustment_percentage:.1f}% (multiplied by {current_adjustment_factor:.2f})")
+        else:
+            st.info("⚖️ **Note**: No adjustment will be applied to forecasts (multiplied by 1.00)")
 
         # Show optimization status
         if enable_hyperopt:
