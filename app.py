@@ -790,6 +790,136 @@ def create_comparison_chart_for_available_months_only(result_df, forecast_year, 
     return fig
 
 
+def create_historical_comparison_chart(historical_df, actual_df=None, forecast_year=None):
+    """
+    Create a comparison chart showing historical sales per month across different years.
+    Only shows real/actual sales data, no predictions.
+    """
+    try:
+        # Start with historical data
+        all_data = []
+        
+        # Process historical data
+        hist_copy = historical_df.copy()
+        hist_copy['Year'] = hist_copy['Month'].dt.year
+        hist_copy['Month_Name'] = hist_copy['Month'].dt.strftime('%b')
+        hist_copy['Month_Num'] = hist_copy['Month'].dt.month
+        
+        # Use original sales if available, otherwise use regular sales
+        sales_col = 'Sales_Original' if 'Sales_Original' in hist_copy.columns else 'Sales'
+        
+        # Group by year and month
+        hist_grouped = hist_copy.groupby(['Year', 'Month_Name', 'Month_Num'])[sales_col].sum().reset_index()
+        hist_grouped['Source'] = 'Historical'
+        all_data.append(hist_grouped)
+        
+        # Add actual data if available
+        if actual_df is not None and len(actual_df) > 0:
+            actual_copy = actual_df.copy()
+            actual_copy['Year'] = actual_copy['Month'].dt.year
+            actual_copy['Month_Name'] = actual_copy['Month'].dt.strftime('%b')
+            actual_copy['Month_Num'] = actual_copy['Month'].dt.month
+            
+            # Find the sales column (could be 'Actual_2024', 'Actual_2025', etc.)
+            actual_col = [col for col in actual_copy.columns if col.startswith('Actual_')]
+            if actual_col:
+                actual_copy['Sales'] = actual_copy[actual_col[0]]
+                actual_grouped = actual_copy.groupby(['Year', 'Month_Name', 'Month_Num'])['Sales'].sum().reset_index()
+                actual_grouped.rename(columns={'Sales': sales_col}, inplace=True)
+                actual_grouped['Source'] = f'Actual {forecast_year}'
+                all_data.append(actual_grouped)
+        
+        # Combine all data
+        combined_df = pd.concat(all_data, ignore_index=True)
+        
+        # Get unique years
+        years = sorted(combined_df['Year'].unique())
+        
+        # Create the chart
+        fig = go.Figure()
+        
+        # Color palette
+        colors = px.colors.qualitative.Set3[:len(years)]
+        
+        # Add a trace for each year
+        for i, year in enumerate(years):
+            year_data = combined_df[combined_df['Year'] == year].sort_values('Month_Num')
+            
+            # Determine if this is actual data for the forecast year
+            is_actual_year = (actual_df is not None and year == forecast_year and 
+                            any(year_data['Source'].str.contains('Actual')))
+            
+            # Create label
+            if is_actual_year:
+                label = f"📊 {year} (Actual)"
+                line_width = 4
+                marker_size = 10
+            else:
+                label = f"📈 {year}"
+                line_width = 2.5
+                marker_size = 7
+            
+            fig.add_trace(go.Scatter(
+                x=year_data['Month_Name'],
+                y=year_data[sales_col],
+                mode='lines+markers',
+                name=label,
+                line=dict(color=colors[i % len(colors)], width=line_width),
+                marker=dict(size=marker_size),
+                hovertemplate=f"{year}<br>%{{x}}: %{{y:,.0f}}<extra></extra>"
+            ))
+        
+        # Update layout
+        fig.update_layout(
+            title='📊 Historical Sales Comparison by Month<br><sub>Real sales data only - no predictions</sub>',
+            xaxis_title='Month',
+            yaxis_title='Sales Volume',
+            xaxis=dict(
+                tickmode='array',
+                tickvals=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
+                         'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+                ticktext=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
+                         'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+            ),
+            height=600,
+            hovermode='x unified',
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="center",
+                x=0.5
+            )
+        )
+        
+        # Add annotations for insights
+        # Find best and worst months across all years
+        monthly_avg = combined_df.groupby('Month_Name')[sales_col].mean().reset_index()
+        monthly_avg['Month_Num'] = combined_df.groupby('Month_Name')['Month_Num'].first().values
+        monthly_avg = monthly_avg.sort_values('Month_Num')
+        
+        best_month = monthly_avg.loc[monthly_avg[sales_col].idxmax()]
+        worst_month = monthly_avg.loc[monthly_avg[sales_col].idxmin()]
+        
+        # Add subtitle with insights
+        fig.add_annotation(
+            text=f"Best performing month: {best_month['Month_Name']} (avg: {best_month[sales_col]:,.0f}) | " +
+                 f"Lowest performing month: {worst_month['Month_Name']} (avg: {worst_month[sales_col]:,.0f})",
+            xref="paper", yref="paper",
+            x=0.5, y=-0.15,
+            showarrow=False,
+            font=dict(size=12, color="gray"),
+            xanchor="center"
+        )
+        
+        return fig, combined_df
+        
+    except Exception as e:
+        st.error(f"Error creating historical comparison chart: {str(e)}")
+        return None, None
+
+
 def main():
     """
     Main function to run the advanced forecasting app.
@@ -1009,6 +1139,54 @@ def main():
                     st.info("📊 Log transformation applied to reduce skewness")
             with col3:
                 st.metric("✅ Data Points", len(hist_df))
+
+    # Historical Sales Comparison (NEW SECTION)
+    st.subheader("📊 Historical Sales Pattern Analysis")
+    st.markdown("**Comparing real sales data across different years**")
+    
+    # Create the historical comparison chart
+    hist_comparison_fig, hist_comparison_data = create_historical_comparison_chart(
+        hist_df, 
+        actual_2024_df, 
+        forecast_year
+    )
+    
+    if hist_comparison_fig:
+        st.plotly_chart(hist_comparison_fig, use_container_width=True)
+        
+        # Show summary statistics
+        if hist_comparison_data is not None and len(hist_comparison_data) > 0:
+            with st.expander("📊 Historical Data Summary"):
+                # Calculate year-over-year growth
+                yearly_totals = hist_comparison_data.groupby('Year')[
+                    'Sales_Original' if 'Sales_Original' in hist_comparison_data.columns else 'Sales'
+                ].sum().reset_index()
+                yearly_totals.columns = ['Year', 'Total Sales']
+                
+                if len(yearly_totals) > 1:
+                    yearly_totals['YoY Growth %'] = yearly_totals['Total Sales'].pct_change() * 100
+                    yearly_totals['YoY Growth %'] = yearly_totals['YoY Growth %'].apply(
+                        lambda x: f"{x:+.1f}%" if pd.notna(x) else "N/A"
+                    )
+                
+                yearly_totals['Total Sales'] = yearly_totals['Total Sales'].apply(lambda x: f"{x:,.0f}")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.dataframe(yearly_totals, use_container_width=True)
+                
+                with col2:
+                    # Show seasonal patterns
+                    sales_col = 'Sales_Original' if 'Sales_Original' in hist_comparison_data.columns else 'Sales'
+                    monthly_pattern = hist_comparison_data.groupby('Month_Name')[sales_col].agg(['mean', 'std']).reset_index()
+                    monthly_pattern['Month_Num'] = hist_comparison_data.groupby('Month_Name')['Month_Num'].first().values
+                    monthly_pattern = monthly_pattern.sort_values('Month_Num')
+                    monthly_pattern['Avg Sales'] = monthly_pattern['mean'].apply(lambda x: f"{x:,.0f}")
+                    monthly_pattern['Std Dev'] = monthly_pattern['std'].apply(lambda x: f"{x:,.0f}")
+                    monthly_pattern = monthly_pattern[['Month_Name', 'Avg Sales', 'Std Dev']]
+                    monthly_pattern.columns = ['Month', 'Average Sales', 'Std Deviation']
+                    st.markdown("**Monthly Patterns (All Years)**")
+                    st.dataframe(monthly_pattern, use_container_width=True)
 
     # Generate advanced forecasts
     if st.button("🚀 Generate Advanced AI Forecasts", type="primary"):
